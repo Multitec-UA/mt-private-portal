@@ -114,7 +114,7 @@ Two strategies behind one interface:
   supplied by Terraform from Secret Manager. This is the pattern `minecraft-allowlist`
   already uses (`ADMIN_EMAILS`), and it is enough for a junta of a handful of people.
 - **later:** the Google Workspace **Directory API**, so membership of
-  `junta@multitecua.com` *is* the admin list and nobody edits an env var to add a board
+  `direccion@multitecua.com` *is* the admin list and nobody edits an env var to add a board
   editor. Multitec already runs `mt-workspace-users-api` and `workspace-dynamic-groups`.
 
 The rule that outlives both: **nothing the browser can influence may decide admin-ness.**
