@@ -2,14 +2,24 @@
 
 - **Status:** proposed — this is the design, not yet the implementation
 - **Date:** 2026-08-28
-- **Depends on:** ADR 0001. Evidence for every claim about the code: `../architecture-notes.md`
+- **Depends on:** ADR 0001. Runtime shape: **ADR 0003**. Evidence for every claim about the
+  code: `../architecture-notes.md`
+
+> **Revised the same day, after Sergio read the first draft.** Two things in it were his to
+> decide and I had decided them for him. There is **no load balancer** in this project —
+> IAP is applied directly on the Cloud Run service, which changes the audience string the
+> whole security design pivots on (ADR 0003). And session lifetime stays at Homarr's
+> default: *"no me preocupan las sesiones largas… hay muy pocas altas y bajas en esta
+> asociación."* §4 below is what that costs, stated plainly, so the trade is on the record
+> rather than assumed.
 
 ## Context
 
 The portal will be served from Google Cloud behind **Identity-Aware Proxy**, exactly like
-`minecraft-allowlist` and `mc-map` already are: Cloud Run with
-`allow_unauthenticated: false`, behind the external Application Load Balancer, IAP on the
-backend service with `members: ["domain:multitecua.com"]`.
+`minecraft-allowlist` and `mc-map` already are: a Cloud Run service with
+`allow_unauthenticated: false` and `cloudrun.iap.enabled: true`, restricted to
+`domain:multitecua.com`. **No load balancer** — IAP is enforced by Cloud Run itself, and
+the custom name comes from a Cloud Run domain mapping. See ADR 0003.
 
 By the time a request reaches the container, Google has **already** authenticated the
 person. Asking them for a Homarr username and password after that is worse than
@@ -38,9 +48,16 @@ the two unsigned headers *"are available for compatibility, but you shouldn't re
 as a security mechanism"*.
 
 Claims in the JWT: `iss` (`https://cloud.google.com/iap`), `sub`, `email`, `hd`, `exp`/`iat`
-(**≈10 minute lifetime**), `google.access_levels`, and `aud` — which for a backend service
-behind the external ALB is the exact string
-`/projects/<PROJECT_NUMBER>/global/backendServices/<BACKEND_SERVICE_ID>`.
+(**≈10 minute lifetime**), `google.access_levels`, and `aud` — which **for IAP enabled
+directly on a Cloud Run service**, which is our shape, is the exact string
+
+```
+/projects/<PROJECT_NUMBER>/locations/<REGION>/services/<SERVICE_NAME>
+```
+
+and *not* the `/global/backendServices/<id>` form used behind a load balancer. Getting this
+wrong does not fail open — an assertion simply never validates — but it is the single most
+error-prone constant in the design, which is why it has no default in the env schema.
 
 **There is no groups claim.** IAM can grant IAP access to a Google group, but the
 application never learns which groups the person belongs to. Admin-ness has to come from
@@ -72,7 +89,8 @@ packages/auth/providers/iap/
    `jose` (already at `6.2.3` in the tree), algorithm pinned to **ES256**;
 3. `iss === "https://cloud.google.com/iap"`;
 4. `aud === AUTH_IAP_AUDIENCE`, exact match, **no default and no wildcard** — this is what
-   makes an assertion minted for a *different* IAP-protected Multitec service useless here;
+   makes an assertion minted for a *different* IAP-protected Multitec service useless here.
+   For us that string is the Cloud Run form above;
 5. `exp`/`iat` within a small clock skew;
 6. `hd === AUTH_IAP_HOSTED_DOMAIN` when set, and the email domain matches;
 7. cross-check `X-Goog-Authenticated-User-Email` against the JWT's `email` and refuse on
@@ -113,21 +131,32 @@ adds and removes memberships but never creates a group. Seed `socios` (permissio
 `iap` is credentials-shaped there is no redirect round trip: the page mounts, posts, gets a
 session cookie and moves on. The user sees a flash of the login page at worst.
 
-### 4. Re-check the identity on every request
+### 4. Session lifetime stays at the default — and here is the bill
 
-This is the part that is easy to leave out and expensive to leave out.
+The first draft proposed short Homarr sessions plus a per-request identity check. Sergio
+overruled it, and the reasoning is sound for this association: **IAP has no way to tell the
+application that someone's access was revoked** — it just stops letting them past the front
+door — but a Homarr database session lives for `AUTH_SESSION_EXPIRY_TIME`, which defaults to
+**30 days**. With a handful of joins and leaves a year, a member who leaves keeps a working
+session for at most a month, on a device they already had, on a portal of internal links.
+That is a real risk and it is a small one, and shortening every session for everybody is not
+a proportionate answer to it.
 
-IAP has **no way to tell the application that someone's access was revoked** — it just
-stops letting them through the front door. A Homarr database session, however, lives for
-`AUTH_SESSION_EXPIRY_TIME`, which defaults to **30 days**. So:
+So: **leave `AUTH_SESSION_EXPIRY_TIME` alone.** What that costs, on the record:
 
-- set `AUTH_SESSION_EXPIRY_TIME` to something short (1–8 hours). The user never notices,
-  because re-login is automatic;
-- in `apps/nextjs/src/proxy.ts`, compare the IAP identity on *this* request against the
-  identity the session belongs to. On mismatch — or when the IAP header is missing on a
-  deployment configured for IAP — drop the session cookie and bounce through login. This
-  also fixes the shared-browser case, where person B would otherwise inherit person A's
-  Homarr session while IAP correctly says they are person B.
+- someone who loses IAP access keeps their existing Homarr session until it expires. Killing
+  it early is a `DELETE` on the `sessions` row, which is a one-liner worth putting in a
+  runbook rather than in the request path;
+- **a shared browser shows the wrong person.** Auto-login only fires when there is no
+  session, so if two people use the same machine, the second inherits the first's Homarr
+  identity while IAP correctly says they are someone else. This is a correctness bug, not
+  only a security one, and it is invisible when it happens.
+
+The per-request check therefore survives as an **opt-in flag, default off**
+(`MULTITEC_IAP_VERIFY_EVERY_REQUEST`): compare the IAP identity on this request against the
+session's, and bounce through login on a mismatch. It is a few lines in
+`apps/nextjs/src/proxy.ts` and it costs nothing to have written and unused. Turn it on the
+day the portal is opened on a shared machine.
 
 ### 5. Close the other doors
 
@@ -140,34 +169,38 @@ stops letting them through the front door. A Homarr database session, however, l
   auto-login signs the person straight back in. Point `AUTH_LOGOUT_REDIRECT_URL` at IAP's
   sign-out endpoint so both are cleared, or remove the logout control entirely — on an
   IAP-gated portal it does not mean what users think it means.
-- Homarr's REST/MCP API and its `ApiKey` header sit behind the same load balancer, so IAP
+- Homarr's REST/MCP API and its `ApiKey` header are on the same Cloud Run service, so IAP
   blocks them for anything without a Google identity. That is the behaviour we want; it also
-  means any future machine-to-machine caller needs an IAP OIDC token, not just an API key.
+  means any future machine-to-machine caller needs an IAP OIDC token, not just an API key —
+  and note Cloud Run enforces IAP *before* the IAM check, so a service account that is
+  merely `run.invoker` is not enough.
 
 ## Threat model, briefly
 
 | Threat | What stops it |
 |---|---|
 | Someone forges `X-Goog-Authenticated-User-Email` | We never read it as an authority. The JWT signature does the work. |
-| Someone reaches Cloud Run directly, bypassing the LB | `allow_unauthenticated: false` + ingress restricted to the load balancer. And even then, no valid assertion ⇒ no session. |
+| Someone reaches the container without passing IAP | With IAP on the Cloud Run service, Cloud Run enforces it before its own IAM check — there is no path to the container that skips it. And even then, no valid assertion ⇒ no session. |
 | An assertion stolen from another IAP-protected Multitec service | The exact `aud` check. Assertions are bound to one backend service. |
 | Replay of a captured assertion | ≈10-minute `exp`, plus the bypass defences above — the attacker still has to reach the origin. |
 | A member promotes themselves to admin | Admin-ness is computed server-side from an env allowlist / Directory API. Nothing in the request participates. |
-| An ex-member keeps browsing after losing access | Short Homarr sessions + the per-request identity check in `proxy.ts`. |
+| An ex-member keeps browsing after losing access | **Accepted, deliberately** (§4): the session outlives the revocation by up to 30 days. Kill the `sessions` row to end it now. |
+| A shared browser hands person B person A's identity | **Not covered by default** (§4). `MULTITEC_IAP_VERIFY_EVERY_REQUEST` closes it when it matters. |
 | Compromised board content leaks to the public internet | IAP is domain-restricted; there is no anonymous path to the origin at all. |
 
 **Defence in depth is the point.** `minecraft-allowlist` trusts the unsigned header, and it
-is defensible there because ingress is locked — but it is *one* control. The portal will
-hold more, so it gets two independent ones: the network path and the signature.
+is defensible there because nothing reaches it without IAP — but it is *one* control, and
+its failure mode is silent. The portal gets two independent ones: the platform enforcing
+IAP, and a signature we verify ourselves.
 
 ## Effort, honestly
 
 | Phase | Work | Estimate |
 |---|---|---|
 | **0. Spike** | Prove two things on a throwaway deployment: that `x-goog-iap-jwt-assertion` actually arrives at a Cloud Run container behind the ALB, and that Homarr's `/websockets` survives IAP. | **½–1 day, and it must come first** |
-| 1. Infrastructure | Terraform in `multitec-terrafrom`: Cloud Run (`min=1, max=1`, CPU always allocated), Cloud SQL, Redis, the LB path rule, IAP members, DNS. The module already supports all of it. | 1–2 days |
+| 1. Infrastructure | Terraform in `multitec-terrafrom`: the Cloud Run service with `iap.enabled`, the domain mapping, the external database and Redis, and the weekly Cloud Run Job. No load balancer. See ADR 0003. | 1–2 days |
 | 2. The provider | `packages/auth/providers/iap/` + the eight upstream hunks + unit tests. ~300–400 lines. | 1–2 days |
-| 3. Session hygiene | `proxy.ts` identity check, short sessions, logout behaviour. | ½ day |
+| 3. Session hygiene | Logout behaviour, and the opt-in `proxy.ts` identity check left switched off. | ¼ day |
 | 4. Groups from Workspace | Directory API strategy replacing the env allowlist. | 1–2 days, later |
 | 5. Content and branding | Boards, tiles, Multitec theme, Spanish copy. Not engineering. | open-ended |
 
@@ -181,10 +214,10 @@ cannot". The code is the small part. The risk is concentrated in phase 0.
   between a ~10-minute assertion and a long-lived connection. If it fails, the fallback is
   polling — supported, but it changes how the product feels. This is the one unknown big
   enough to change the plan.
-- **Cost.** Cron jobs and the WebSocket server run *inside* the Next.js process, so the
-  service cannot scale to zero and cannot run two instances. `min=1` with CPU always
-  allocated prices like a small always-on VM — and a plain GCE instance behind the same
-  LB+IAP would be cheaper for the same shape. Worth pricing before committing to Cloud Run.
+- **Cost — largely solved by ADR 0003.** The reason the first draft needed an always-warm
+  instance was the embedded cron. Moving it to a Cloud Run Job lets the web service scale to
+  zero, provided Redis is external. What remains to decide is the database, and that is
+  Sergio's call, not an engineering one.
 - **Upstream moving the login page.** Two of our eight hunks are in the login UI, which is
   more volatile than the auth package. If it becomes painful, the auto-login can move to
   `proxy.ts` instead and the UI hunks disappear.

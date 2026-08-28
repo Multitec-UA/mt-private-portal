@@ -22,15 +22,17 @@ are hidden inside the third:
   (`apps/nextjs/src/instrumentation.ts`), **the cron runner (`@homarr/tasks`) and the
   WebSocket server (`@homarr/websocket`) start embedded in the same process.**
 
-That last point is the single most important deployment fact in this repository. Homarr is
-an **always-on, single-instance, stateful** application:
+That last point is the single most important deployment fact in this repository. **Out of
+the box** Homarr is an always-on, single-instance, stateful application:
 
 - the cron jobs live in every Next.js process, so *N* instances run every job *N* times;
 - the WebSocket server backs tRPC subscriptions — boards update live over it;
 - Redis is a hard dependency, not a cache you can drop.
 
-Anything that scales this horizontally or lets it idle to zero breaks something. See
-§5.
+Out of the box, therefore, anything that scales it horizontally or lets it idle to zero
+breaks something. §5 is about how much of that is actually load-bearing for us: the cron
+constraint can be lifted, and once it is, the other two stop forcing an always-warm
+instance.
 
 State lives in exactly two places: the SQL database and Redis. **Uploaded media is a
 `blob` column in the database** (`packages/db/schema/sqlite.ts:179`), not a file on disk —
@@ -145,7 +147,8 @@ change measured against how much it buys.
 
 ## 4. Identity: what IAP actually hands us
 
-Google IAP sits in front of the load balancer and adds three headers
+Google IAP sits in front of the container — for us, enabled directly on the Cloud Run
+service, with no load balancer (§5) — and adds three headers
 ([signed headers](https://docs.cloud.google.com/iap/docs/signed-headers-howto)):
 
 - `x-goog-iap-jwt-assertion` — an **ES256-signed JWT**. The only trustworthy one.
@@ -160,8 +163,10 @@ JWT claims: `iss` = `https://cloud.google.com/iap`, `sub`, `email`, `hd` (hosted
 `exp`/`iat` (**≈10 minute lifetime**), `google.access_levels`, and `aud`, whose exact form
 depends on the resource:
 
-- backend service behind an external ALB — `/projects/<number>/global/backendServices/<id>`
-- IAP enabled directly on Cloud Run — `/projects/<number>/locations/<region>/services/<name>`
+- **IAP enabled directly on Cloud Run — `/projects/<number>/locations/<region>/services/<name>`.
+  This is ours.**
+- backend service behind an external ALB — `/projects/<number>/global/backendServices/<id>`.
+  Not ours, and picking this one by mistake means no assertion ever validates.
 
 Public keys: `https://www.gstatic.com/iap/verify/public_key-jwk`.
 
@@ -173,11 +178,12 @@ the Workspace Directory API. Multitec already has both an
 and a Directory-API service in `mt-workspace-users-api`.
 
 Also worth knowing: the IAP session is Google's, not ours. **IAP has no way to tell the
-application that a user's access was revoked** — it simply stops letting them past. If
-Homarr has already minted a 30-day database session (`AUTH_SESSION_EXPIRY_TIME` defaults to
-`30d`), that session outlives the revocation for anyone who can reach the origin. Two
-mitigations, and we want both: short Homarr sessions, and re-checking the IAP identity on
-every request rather than only at sign-in.
+application that a user's access was revoked** — it simply stops letting them past. A Homarr
+database session lives for `AUTH_SESSION_EXPIRY_TIME`, which defaults to `30d`, so it
+outlives the revocation. **Sergio has accepted that** — this association has very few joins
+and leaves, and shortening every session for everyone is not proportionate to it. The
+consequences, including the shared-browser case it also leaves open, are written out in
+ADR 0002 §4 rather than silently designed around.
 
 Full design and threat model: **`docs/multitec/adr/0002-iap-authentication.md`**.
 
@@ -185,42 +191,91 @@ Full design and threat model: **`docs/multitec/adr/0002-iap-authentication.md`**
 
 ## 5. Deployment consequences
 
-The Multitec pattern for this is settled and proven twice (`minecraft-allowlist`,
-`mc-map`): Cloud Run with `allow_unauthenticated: false`, behind the external Application
-Load Balancer, with IAP on the backend service restricted to `domain:multitecua.com`. It
-is all already expressed in `multitec-terrafrom` (`gcp.lb.tf`, the `iap:` block in
-`settings/multitecweb.yaml`).
+**Corrected 2026-08-28 after Sergio read the first version.** It assumed an external
+Application Load Balancer, because `multitec-terrafrom` contains a whole IAP-per-path-rule
+mechanism in `gcp.lb.tf`. That mechanism is not in use: `lb_enabled = can(local.settings.lb)`
+and `settings/multitecweb.yaml` has no `lb:` key. **IAP is applied directly to the Cloud Run
+service** (`gcp.cloudrun.tf:303`), and custom names come from Cloud Run domain mappings.
+There is no load balancer anywhere in this project, and there will not be one — it is a cost
+the association will not carry. The full reasoning is **ADR 0003**; what follows is the shape
+of the application that constrains it.
 
-Homarr fits that pattern, with four caveats that come straight from §1:
+### The three jobs, and why that number matters
 
-1. **`min_instances: 1`, `max_instances: 1`, CPU always allocated.** Cron jobs run inside
-   the Next.js process, so a second instance duplicates every job and scale-to-zero stops
-   them. This is the expensive shape of Cloud Run — an always-warm instance with CPU
-   allocated costs on the order of a small VM, and a plain GCE instance behind the same
-   LB+IAP would be cheaper. Worth pricing before committing.
-2. **Database: Cloud SQL (PostgreSQL or MySQL).** Not the bundled sqlite — a single
-   Cloud Run instance with a sqlite file on a GCS FUSE mount is a corruption story. With
-   Cloud SQL, media blobs live in the database and the container needs no volume.
-3. **Redis.** Bundled Redis works while there is exactly one instance; Memorystore is the
-   clean answer and `REDIS_IS_EXTERNAL=true` is already supported.
-4. **WebSockets through IAP are the open risk.** The board UI subscribes over
-   `/websockets`. The external ALB proxies WebSocket upgrades, and IAP authenticates the
-   HTTP handshake — but the interaction of a ~10-minute IAP assertion with a long-lived
-   connection is not something Google documents clearly, and no Multitec service has ever
-   run a WebSocket behind IAP. **This needs a spike before anything else is built**; if it
-   fails, the fallback is polling, which Homarr supports but which changes the feel of the
-   product.
+The cron runner is embedded in the Next.js process (§1), which is what would otherwise
+force an always-warm, single-instance deployment. Before designing around that, count the
+jobs. There are **three**, in `packages/cron-jobs/src/jobs/`:
 
-Two more, smaller:
+| Job | Schedule | For a benefits portal |
+|---|---|---|
+| `ping` | every minute | not wanted — our tiles link to external sites, not homelab services |
+| `analytics` | weekly | not wanted — telemetry to upstream |
+| `iconsUpdater` | weekly | the only one worth running |
 
-- `AUTH_SECRET` is regenerated on every container start (`scripts/run.sh:20`). Harmless
-  here because sessions are rows in the database, not JWTs — but do not build anything
-  that assumes it is stable.
+The first two switch off **by configuration**: `initializeAsync` skips any job whose
+`cron_job_configuration.isEnabled` is false (`packages/cron-jobs-core/src/group.ts:44`), and
+`/manage/tools/tasks` is the UI for it. `ping` additionally no-ops when the
+`board.forceDisableStatus` server setting is on.
+
+So the scheduled workload is one weekly job — a Cloud Run Job on a Cloud Scheduler trigger,
+not a second always-on service. The one-shot entrypoint is easy because croner tasks are
+created **paused** (`packages/cron-jobs-core/src/creator.ts:93`) and only resumed by
+`startAllAsync`: `initializeAsync()` → `runManuallyAsync("iconsUpdater")` → exit runs
+exactly that job and nothing else. (`runManuallyAsync` refuses jobs flagged
+`preventManualExecution`, which is only `analytics`.)
+
+### What that unlocks
+
+Take the scheduler out of the web service — a runtime guard in
+`apps/nextjs/src/instrumentation.ts`, keeping `startWebsocketAsync()` — and the two reasons
+it could not scale disappear. The service can then **scale to zero and run more than one
+instance**, because the WebSocket server is backed by Redis pub/sub.
+
+That requires **external Redis**. `REDIS_IS_EXTERNAL=true` with host, port, username,
+password and a TLS CA is already in the env schema
+(`packages/core/src/infrastructure/redis/env.ts`); the bundled in-container Redis makes each
+instance an island and dies on scale-down.
+
+Expect this behaviour, which is not a defect: a browser holding a board open keeps its
+instance alive, because Cloud Run counts an open WebSocket as an in-flight request. At the
+request timeout the connection is cut and the client reconnects.
+
+### The database
+
+External, and the choice is Sergio's — Cloud SQL is out on cost. What the code needs, so a
+free tier can be judged on facts:
+
+- `DB_DRIVER=node-postgres` with `DB_URL` (a connection string, so `sslmode=require` works)
+  or the `DB_HOST`/`PORT`/`USER`/`PASSWORD`/`NAME` set. MySQL is equally supported
+  (`packages/core/src/infrastructure/db/env.ts`).
+- Migrations run at container start (`scripts/run.sh`), so the account needs DDL rights.
+- **Uploaded media is a `blob` column** (§1). No volume is needed anywhere — and that same
+  fact is what will eat a free tier's storage quota first. Judge the size cap against how
+  many logos and backgrounds la junta will upload, not against the row count.
+- A serverless Postgres that sleeps when idle pairs badly with a service that also scales to
+  zero: the first visit of the day pays both cold starts.
+
+### Two smaller ones
+
+- `AUTH_SECRET` is regenerated on every container start (`scripts/run.sh:20`). Harmless,
+  because sessions are rows in the database rather than JWTs — but nothing may assume it is
+  stable, and that matters more now that there can be several instances.
 - The **first-run onboarding wizard** (`/init`, `packages/definitions/src/onboarding.ts`)
   will greet whoever arrives first if the instance is published before onboarding is
   finished. Complete onboarding on a closed deployment, then open IAP.
 
----
+### Still unproven
+
+**WebSockets behind IAP.** The board UI subscribes over `/websockets`. Google documents
+neither support nor a limitation for a long-lived connection under a ~10-minute assertion,
+and no Multitec service has ever run one behind IAP. **This needs a spike before anything
+else is built**; if it fails, the fallback is polling, which Homarr supports but which
+changes how the product feels.
+
+**That the signed assertion arrives at all.** Google documents `x-goog-iap-jwt-assertion`
+for Cloud Run and documents the `/projects/…/locations/…/services/…` audience form, so it is
+expected — but `minecraft-allowlist` only ever reads the *unsigned* email header, so nobody
+here has observed it. The security design in ADR 0002 rests on it.
 
 ## 6. Things that will bite
 

@@ -45,8 +45,13 @@ that change is agreed before it is written rather than discovered afterwards. Th
 | `apps/nextjs/src/app/api/auth/[...nextauth]/route.ts` | an `iap` branch in `extractProvider` |
 | `apps/nextjs/src/app/[locale]/auth/login/page.tsx` | pass the auto-login flag through |
 | `apps/nextjs/src/app/[locale]/auth/login/_login-form.tsx` | extend the auto-login effect to `iap` |
-| `apps/nextjs/src/proxy.ts` | re-check the IAP identity against the live session |
+| `apps/nextjs/src/instrumentation.ts` | skip the embedded cron runner when `MULTITEC_EMBEDDED_TASKS` is off, keeping the WebSocket server (ADR 0003) |
+| `apps/nextjs/src/proxy.ts` | **opt-in, default off** — re-check the IAP identity against the live session (ADR 0002 §4) |
 
-Eight files, against a budget of twelve. Everything else the provider needs lives in new
-files under `packages/auth/providers/iap/`, which the guard treats as ours once
-registered.
+Nine files, against a budget of twelve. Everything else lives in new files — the provider
+under `packages/auth/providers/iap/`, and the one-shot Cloud Run Job entrypoint in our own
+namespace — which the guard treats as ours once registered.
+
+The last two are the ones to argue about before writing them. `instrumentation.ts` is what
+lets the service scale to zero, so it earns its place; `proxy.ts` buys a case Sergio has
+decided he can live with, so it should probably wait until something actually needs it.

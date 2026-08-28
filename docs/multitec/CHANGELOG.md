@@ -11,6 +11,68 @@ was verified afterwards.
 
 ---
 
+## 2026-08-28 — the deployment design was wrong, and correcting it made it cheaper
+
+**What.** Sergio read the first analysis and corrected four things. ADR 0003 is new,
+ADR 0002 and `architecture-notes.md` §1, §4 and §5 are revised.
+
+1. **There is no load balancer, and there will not be one.** *"El load balancer es un coste
+   que no nos podemos permitir."* He is right and the first draft was wrong: `gcp.lb.tf`
+   has a whole IAP-per-path-rule mechanism, but `lb_enabled = can(local.settings.lb)` and
+   `settings/multitecweb.yaml` has no `lb:` key. IAP is applied to the Cloud Run service
+   (`gcp.cloudrun.tf:303`) and custom names come from domain mappings. **This changes the
+   JWT audience** from `/projects/…/global/backendServices/…` to
+   `/projects/…/locations/…/services/…` — the constant the whole security design pivots on.
+   I had read the module instead of the settings.
+2. **Sessions stay at the default 30 days.** *"No me preocupan las sesiones largas… hay muy
+   pocas altas y bajas en esta asociación."* Proportionate, and accepted. What it costs is
+   now written down instead of assumed — including the shared-browser case, where the second
+   person inherits the first's Homarr identity. The per-request check survives as an opt-in
+   flag, default off.
+3. **The cron runner moves to Cloud Run Jobs.**
+4. **The database will be an external free tier** (Supabase or similar), not Cloud SQL —
+   a decision to take together.
+
+**Why point 3 turned out to be worth more than it looked.** Counting the jobs before
+designing around them: there are **three**. `ping` runs every minute and exists to put
+up/down dots on tiles that, for us, link to external member benefits — not wanted.
+`analytics` is telemetry to upstream — not wanted. Both switch off by *configuration*
+(`cron_job_configuration.isEnabled`, and `/manage/tools/tasks`), no code. That leaves
+`iconsUpdater`, weekly, which is one Cloud Run Job on a Cloud Scheduler trigger.
+
+And the embedded cron was the **only** reason the service needed `min=1, max=1` with CPU
+always allocated — the expensive shape of Cloud Run. Take it out and the web service can
+scale to zero and run several instances, because the WebSocket server is backed by Redis
+pub/sub. **His cost instruction removed the cost problem, not just moved a job.** The
+condition is external Redis, which the env schema already supports in full.
+
+The one-shot entrypoint is easy for a reason worth recording: croner tasks are created
+**paused** (`cron-jobs-core/src/creator.ts:93`) and only resumed by `startAllAsync`, so
+`initializeAsync()` → `runManuallyAsync("iconsUpdater")` → exit runs exactly that job and
+nothing else fires.
+
+**Evidence.**
+
+```
+$ grep -n 'lb_enabled' ~/code/multitec-terrafrom/gcp.lb.tf
+7:  lb_enabled    = can(local.settings.lb)
+$ grep -c '^lb:' ~/code/multitec-terrafrom/settings/multitecweb.yaml
+0
+$ grep -n 'iap_enabled' ~/code/multitec-terrafrom/gcp.cloudrun.tf
+303:    iap_enabled = try(each.value.cloudrun.iap.enabled, false)
+
+$ ls packages/cron-jobs/src/jobs/
+analytics.ts  icons-updater.ts  ping.ts
+
+$ docs/multitec/tools/upstream-guard.sh
+upstream-guard: OK — 0 upstream file(s) touched, all registered (budget 12)
+```
+
+**Still no application code**, and the expected-touchpoints list grew from eight files to
+nine. Two of those nine are now flagged as worth arguing about before they are written.
+
+---
+
 ## 2026-08-28 — fork taken, working rules established
 
 **What.** Forked `homarr-labs/homarr` into `Multitec-UA/mt-private-portal` at
