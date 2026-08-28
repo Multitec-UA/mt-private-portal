@@ -89,17 +89,34 @@ The control that makes every other result meaningful:
 | anonymous `GET /` | **302** to `accounts.google.com` |
 | anonymous `GET /probe.json` | **302** |
 | anonymous `GET /probe.txt` | **302** |
-| anonymous `GET /healthz` | **404** |
+| anonymous `GET /healthz` | **404** — see §3b, this one is not IAP |
 | OIDC token, `aud` = service URL | **401** `Invalid IAP credentials: Invalid bearer token. Invalid JWT audience.` |
 
-Two things worth keeping:
+The 401 on a perfectly good Cloud Run invoker token confirms **IAP is enforced before the
+IAM check**. There is no "I have run.invoker so I am in" path.
 
-- The 401 on a perfectly good Cloud Run invoker token confirms **IAP is enforced before
-  the IAM check**. There is no "I have run.invoker so I am in" path.
-- `/healthz` answers **404, not 302**, to an anonymous caller. It does not leak, but it
-  also means **an unauthenticated uptime check cannot work through IAP**. If the portal
-  ever needs external monitoring, that monitor needs an IAP credential — plan for it
-  rather than discovering it when the first alert never fires.
+The practical consequence of the 302s: **an unauthenticated uptime check cannot work
+through IAP.** If the portal ever needs external monitoring, that monitor needs an IAP
+credential (§4) — worth planning rather than discovering when the first alert never fires.
+
+## 3b. `/healthz` never reaches the container, and that is not IAP
+
+Chased because the first reading of the table above was wrong. `/healthz` returns 404
+**even with a valid credential**, so it looked like an IAP quirk. It is not:
+
+| authenticated request | who answered |
+|---|---|
+| `GET /nope` | **FastAPI** — `{"detail": ...}`, and it appears in the container's log |
+| `GET /api/health/live` | **FastAPI** |
+| `GET /healthz` | **Google's edge** — an HTML 404 page, and no log line in the container at all |
+
+So **`/healthz` is swallowed in front of Cloud Run and never arrives.** Two things follow:
+
+- Do not put anything on `/healthz` in this project. It will 404 and the container will
+  never see the request, which is a miserable thing to debug.
+- **Homarr is unaffected**: its health endpoint is `/api/health/live`, and that path was
+  measured reaching the container. Confirmed rather than assumed, because the alternative
+  was a startup probe that could never pass.
 
 ## 4. How a machine authenticates to IAP here — the recipe nobody at Multitec had
 
@@ -140,7 +157,7 @@ other things that can fail and be mistaken for the answer. The whole experiment 
 container with no state at all.
 
 Cost of the spike: a Cloud Run service with `min_instances: 0`, up for about half an hour,
-plus an Artifact Registry repository holding one 200 MB image. Both are deleted (§7).
+plus an Artifact Registry repository holding one image of **65 MB**. Both are deleted (§7).
 
 ## 6. WebSockets through IAP
 
@@ -154,7 +171,36 @@ subscriptions at all.
 [    0s] SERVER assertion_on_handshake=True verified=True
 ```
 
-<!-- SOAK-RESULT -->
+**And the connection survives.** Held open for **22 minutes — 2.2× the ten-minute life of an
+assertion — 88 heartbeats, never dropped:**
+
+```
+[    0s] OPEN  handshake accepted
+[    0s] SERVER assertion_on_handshake=True verified=True
+[  600s] beat 40 alive          <- an assertion minted at t=0 has now expired
+[ 1320s] beat 88 alive
+[ 1320s] DONE  held open for the full 22.0 min, 88 beats, never dropped
+```
+
+So IAP authenticates the upgrade and then stays out of the way. The ten-minute assertion
+governs *requests*, not established connections — which is the behaviour Homarr's live
+boards need and the thing no document would confirm.
+
+Two honest limits on that result:
+
+- The client used 20-second WebSocket pings, which is what a real client does; this says
+  nothing about a connection left completely idle.
+- **Cloud Run still caps a request at 60 minutes**, and an open socket is a request. A tab
+  left open all afternoon will be cut and must reconnect. That is a Cloud Run limit, not an
+  IAP one, and it is why `timeout: 3600s` is set explicitly rather than left at the 60s some
+  other services use.
+
+### What this spike deliberately did not prove
+
+It is a probe, not a portal. **That Homarr itself runs on Cloud Run** — its image, its
+migrations against an external Postgres, its cold start, its own `/websockets` through
+nginx — is a separate question, and the next piece of work. The value of keeping them apart
+is that if Homarr misbehaves next week, IAP is already ruled out.
 
 ## 7. Teardown
 
