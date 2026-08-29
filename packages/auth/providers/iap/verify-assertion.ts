@@ -91,19 +91,39 @@ export const verifyIapAssertionAsync = async (
   const hostedDomain = typeof payload.hd === "string" ? payload.hd.toLowerCase() : null;
 
   /**
-   * `hd` is asserted when present and never demanded.
+   * The domain check, and it is deliberately not "trust `hd`".
    *
-   * Measured during the phase-0 spike: **a service account's assertion carries no `hd` at
-   * all** — it is a Workspace-user claim. ADR 0002 originally said to require it, which
-   * would have refused every machine caller the portal ever gains. The domain is enforced
-   * by IAP's own member list (`domain:multitecua.com`) regardless; this is the second,
-   * independent check, and a second check that rejects legitimate callers is worse than
-   * no second check.
+   * `hd` is a Workspace-*user* claim: the phase-0 spike measured a real service-account
+   * assertion arriving with **no `hd` at all**. So requiring the claim to exist would
+   * refuse every machine caller. But the first version of this file then only compared
+   * `hd` *when present* — which meant an identity with no `hd` skipped the domain check
+   * entirely. Nobody could exploit that today, because IAP only admits
+   * `domain:multitecua.com`; it would become exploitable the moment somebody adds one
+   * guest address to the IAP member list, and it would fail open silently, in a different
+   * file from the one they edited.
+   *
+   * So: `hd` decides when it is there, and the address decides only when it is not.
+   *
+   * Not an OR over the two — that was the first attempt at this fix, and an existing test
+   * caught it weakening the very check it was meant to strengthen: an OR accepts a token
+   * whose `hd` says one Workspace while its address says ours. `hd` is the canonical
+   * signal for which Workspace an account belongs to, so when Google states it, it wins.
+   *
+   * A service account outside the domain therefore cannot obtain a portal account — which
+   * is correct: nothing automated needs one. `/api/health/live` needs no session at all.
    */
   const expectedDomain = env.AUTH_IAP_HOSTED_DOMAIN;
-  if (expectedDomain && hostedDomain !== null && hostedDomain !== expectedDomain) {
-    logger.warn("Rejected an IAP sign-in", { reason: "HOSTED_DOMAIN_MISMATCH", email });
-    return null;
+  if (expectedDomain) {
+    const effectiveDomain = hostedDomain ?? email.split("@")[1] ?? "";
+    if (effectiveDomain !== expectedDomain) {
+      logger.warn("Rejected an IAP sign-in", {
+        reason: "DOMAIN_MISMATCH",
+        email,
+        // Which of the two failed, so a misconfiguration is diagnosable from one line.
+        hostedDomainClaim: hostedDomain ?? "(absent)",
+      });
+      return null;
+    }
   }
 
   /**

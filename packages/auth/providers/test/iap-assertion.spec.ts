@@ -143,13 +143,39 @@ describe("verifyIapAssertionAsync", () => {
     expect(await verifyIapAssertionAsync(await sign({ hd: "example.com" }))).toBeNull();
   });
 
-  test("accepts an assertion with NO hosted domain — a service account has none", async () => {
-    // ADR 0002 originally said to require `hd`. The spike measured a real service-account
-    // assertion arriving without it, which would have refused every machine caller the
-    // portal ever gains. Asserted when present, never demanded.
-    const identity = await verifyIapAssertionAsync(await sign({ hd: null, email: "robot@project.iam.gserviceaccount.com" }));
-    expect(identity?.email).toBe("robot@project.iam.gserviceaccount.com");
+  test("accepts a member whose assertion carries NO hd, on the strength of the address", async () => {
+    // `hd` is a Workspace-user claim and the spike measured assertions arriving without
+    // it, so requiring the claim would refuse legitimate callers. The address still has to
+    // be ours — an absent claim is not an absent check.
+    const identity = await verifyIapAssertionAsync(await sign({ hd: null, email: "member@multitecua.com" }));
+    expect(identity?.email).toBe("member@multitecua.com");
     expect(identity?.hostedDomain).toBeNull();
+  });
+
+  test("refuses an identity with no hd AND an address outside the domain", async () => {
+    // The hole the first version had: comparing `hd` only when present meant an identity
+    // without it skipped the domain check entirely. Unreachable while IAP admits only
+    // domain:multitecua.com — and silently exploitable the moment one guest address is
+    // added to that member list, from a different file.
+    expect(
+      await verifyIapAssertionAsync(await sign({ hd: null, email: "robot@project.iam.gserviceaccount.com" })),
+    ).toBeNull();
+  });
+
+  test("hd wins when present, even against an address that looks right", async () => {
+    // This is the case that killed the OR: `hd` is Google stating which Workspace the
+    // account belongs to. If it says somewhere else, the address agreeing with us is not
+    // a reason to admit them — it is a reason to be suspicious.
+    expect(
+      await verifyIapAssertionAsync(await sign({ hd: "example.com", email: "member@multitecua.com" })),
+    ).toBeNull();
+  });
+
+  test("...and a correct hd admits an address outside the domain", async () => {
+    // A Workspace can host addresses on secondary domains. `hd` is the membership claim.
+    expect(
+      await verifyIapAssertionAsync(await sign({ hd: "multitecua.com", email: "member@alias.example" })),
+    ).not.toBeNull();
   });
 
   test("refuses when the signed and unsigned emails disagree", async () => {
