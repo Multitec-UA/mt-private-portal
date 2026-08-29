@@ -7,6 +7,7 @@ upstream will never create a file, so nothing in here can ever conflict on a mer
 |---|---|
 | [`../../MULTITEC.md`](../../MULTITEC.md) | **Start here.** The fork constitution: the rules that keep upstream mergeable. |
 | [`architecture-notes.md`](architecture-notes.md) | What reading Homarr taught us, aimed at the portal: the auth stack traced, the seams an IAP provider attaches to, and the deployment facts that constrain everything. |
+| [`operating-the-portal.md`](operating-the-portal.md) | Running it day to day: why a new board is invisible to members until you grant it, how `everyone` and home boards behave, and how to read the database safely. |
 | [`upstream-sync.md`](upstream-sync.md) | How to pull a new Homarr release, what will conflict, and how to prove the sync. |
 | [`UPSTREAM-TOUCHPOINTS.md`](UPSTREAM-TOUCHPOINTS.md) | The registry of every upstream file we have modified. The guard enforces it. |
 | [`CHANGELOG.md`](CHANGELOG.md) | Our changelog. Upstream's `CHANGELOG.md` is generated; leave it alone. |

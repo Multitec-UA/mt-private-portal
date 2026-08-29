@@ -11,6 +11,51 @@ was verified afterwards.
 
 ---
 
+## 2026-08-29 — why the members saw an empty portal
+
+**What.** No code change. A diagnosis, written down in
+[`operating-the-portal.md`](operating-the-portal.md) so the next person does not repeat it.
+
+**Symptom.** Both Google sign-ins worked — one administrator, one ordinary member, each
+account created on first contact:
+
+```
+IAP sign-in accepted  module="iapProvider"  email="<admin>@multitecua.com"   groups="1"
+IAP sign-in accepted  module="iapProvider"  email="<member>@multitecua.com"  groups="0"
+```
+
+The administrator saw the board and could edit it. The member saw nothing at all.
+
+**Cause.** The board carried **no permissions whatsoever**, and nothing anywhere said so:
+
+```sql
+SELECT * FROM "boardGroupPermission";   -- (0 rows)
+SELECT * FROM "boardUserPermission";    -- (0 rows)
+SELECT name, is_public, creator_id FROM board;
+--  dashboard | f | NULL
+SELECT g.name, p.permission FROM "groupPermission" p JOIN "group" g ON g.id = p.group_id;
+--  credentials-admin | admin        <- the only permission row in the database
+```
+
+`constructBoardPermissions` grants view on five conditions and a member met none of them.
+The administrator met the fifth, `admin` resolving down to `board-view-all` — **so the one
+person able to check was the one person who could not reproduce it.** That is the part
+worth remembering; the missing row is trivial once seen.
+
+**Fix.** Board settings → **Access control** → group `everyone` → **View board**. Granting
+`view` and not `modify` is what makes members readers: `hasChangeAccess` tests for `modify`
+or `full` specifically. Applied through the UI deliberately rather than by `INSERT` — it is
+the same row, it is the route that must be repeated for every future board, and it belongs
+in the hands of whoever owns the board.
+
+**Two things that were already right**, found while looking and worth not re-investigating:
+`everyone` needs no enrolment (`events.ts` adds every user on every sign-in) and it already
+points at that board as its home board, so members land on it rather than merely reaching
+it; and members cannot create boards — `createBoard` requires `board-create`, which
+`everyone` does not have, and the database confirmed no member-created board exists.
+
+---
+
 ## 2026-08-29 — sign in with the identity IAP already proved
 
 **What.** The `iap` auth provider (ADR 0002), so a socio opens the portal and is simply in.
