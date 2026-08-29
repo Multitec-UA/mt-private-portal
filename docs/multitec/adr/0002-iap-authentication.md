@@ -1,6 +1,6 @@
 # ADR 0002 — Sign in with the Google IAP identity, with no login form
 
-- **Status:** proposed — this is the design, not yet the implementation
+- **Status:** **implemented 2026-08-29.** What changed between design and code is in *Deltas* at the end — read that before trusting the body.
 - **Date:** 2026-08-28
 - **Depends on:** ADR 0001. Runtime shape: **ADR 0003**. Evidence for every claim about the
   code: `../architecture-notes.md`
@@ -239,3 +239,48 @@ cannot". The code is the small part. The risk is concentrated in phase 0.
   RSC and tRPC entry point resolves the session through NextAuth's cookie, so this touches
   far more upstream surface than eight hunks. Rejected on merge cost, which is the thing
   ADR 0001 exists to protect.
+
+---
+
+## Deltas — where the implementation departed from this document
+
+Written after the fact, because an ADR that quietly no longer describes the system is worse
+than none.
+
+**1. `hd` is asserted, not required (§1 step 6 was wrong).** The spike measured a real
+service-account assertion arriving with **no `hd` claim at all** — it is a Workspace-*user*
+claim. Requiring it would have refused every machine caller the portal ever gains. It is now
+checked when present and never demanded. The domain is enforced by IAP's own member list
+regardless; this is the second, independent check, and a second check that rejects
+legitimate callers is worse than no second check.
+
+**2. `credentials` stays enabled alongside `iap`, for now.** §5 says to close the password
+door, and it should be closed — but not in the same change that opens the new one. If the
+provider misbehaves, the onboarding password account is the way back in; dropping it in the
+same step means a bug locks everyone out, including whoever would fix it. `AUTH_PROVIDERS`
+is `iap,credentials` until a member and an admin have each signed in through IAP.
+
+To reach the password form while auto-login is on: `/auth/login?error=1`. The effect skips
+itself when the page is showing an error, which upstream wrote for the OIDC case and which
+happens to be exactly the escape hatch this needs.
+
+**3. The admin group is `credentials-admin`, not a new one.** Reading the live database
+rather than guessing: Homarr's onboarding had already created a group of that name holding
+the `admin` permission. Pointing at it means the first IAP sign-in is already an
+administrator with no group to create first.
+
+A prettier name would have needed the group to exist **before** the switch — and if it did
+not, the first IAP admin would arrive with no permissions and no way to create it. Safety
+over the name. Renaming it in the UI later is one env var away, because group sync matches
+on names.
+
+**4. `jose` is a declared dependency.** It was already in the tree under `@auth/core`, and
+pnpm's hoisted layout would have resolved an undeclared import — until the day that
+transitive dependency moved. Three extra registered touchpoints
+(`packages/auth/package.json`, `pnpm-workspace.yaml`, `pnpm-lock.yaml`) is the right price
+for the code that verifies logins not depending on an accident of module resolution.
+
+**5. The per-request identity check is still off.** ADR 0002 §4 leaves
+`MULTITEC_IAP_VERIFY_EVERY_REQUEST` unimplemented, and it stays that way: Sergio accepted
+the 30-day session and the shared-browser consequence. It is written down there rather than
+silently designed around, which is the point.
