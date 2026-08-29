@@ -1,0 +1,46 @@
+# Build the portal image in Cloud Build, with BuildKit.
+#
+# Why this file exists rather than `gcloud builds submit --tag`: that shortcut uses Cloud
+# Build's **legacy** builder, which has no BuildKit, and Homarr's Dockerfile opens with
+# `# syntax=docker/dockerfile:1.25` and uses `COPY --parents`. The legacy builder ignores
+# the syntax directive and then cannot parse the file:
+#
+#   Error response from daemon: dockerfile parse error line 15: Unknown flag: parents
+#
+# It lives under docs/multitec/ rather than at the repository root because a root
+# `cloudbuild.yaml` would be a file inside upstream's tree, and this is ours. Pass it
+# explicitly:
+#
+#   gcloud builds submit --config docs/multitec/tools/cloudbuild.yaml \
+#     --substitutions _IMAGE=<tag> --project multitecweb --region europe-west1
+#
+# It is also here, and not only in a shell history, because the next person to rebuild this
+# image will otherwise rediscover the parse error from scratch.
+
+steps:
+  - name: gcr.io/cloud-builders/docker
+    entrypoint: bash
+    env:
+      # The whole point. Without it the daemon falls back to the legacy parser.
+      - DOCKER_BUILDKIT=1
+    args:
+      - -c
+      - |
+        set -euo pipefail
+        # SKIP_ENV_VALIDATION because the build has no database, no Redis and no IAP
+        # audience — the app validates its environment at boot, and a build box has none
+        # of it. CI=true is what upstream's own Dockerfile passes.
+        docker build \
+          --build-arg SKIP_ENV_VALIDATION=true \
+          --build-arg CI=true \
+          -t "$_IMAGE" .
+        docker push "$_IMAGE"
+
+# The build is a pnpm install plus a Next.js monorepo build. It was tried on quantumpc
+# first and pushed that machine to 1.6 GB free with 5.6 GB of swap in use, next to a live
+# Minecraft server — which is why it runs here instead.
+options:
+  machineType: E2_HIGHCPU_8
+  logging: CLOUD_LOGGING_ONLY
+
+timeout: 2700s
