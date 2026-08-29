@@ -21,26 +21,73 @@ steps:
   - name: gcr.io/cloud-builders/docker
     entrypoint: bash
     env:
-      # The whole point. Without it the daemon falls back to the legacy parser.
       - DOCKER_BUILDKIT=1
     args:
       - -c
       - |
         set -euo pipefail
+
+        # `DOCKER_BUILDKIT=1` alone was not enough, and the second error is more
+        # interesting than the first:
+        #
+        #   requested experimental feature exec.secretenv is not supported by build
+        #   server, please update docker
+        #
+        # BuildKit was running by then, but it was the daemon's own — and Cloud Build's
+        # daemon is too old for the `--mount=type=secret,env=…` form that upstream's
+        # Dockerfile uses for its Turbo remote-cache credentials. There is no flag for
+        # that; the build server itself is the thing that is old.
+        #
+        # The docker-container driver sidesteps it entirely by running a current BuildKit
+        # in a container, independent of whatever daemon is underneath. That is also why
+        # this does NOT patch the Dockerfile to drop those mounts: touching an upstream
+        # file to work around our builder would conflict on every upstream Dockerfile
+        # change, forever, for a build-host problem.
+        docker buildx create --use --name mt-builder --driver docker-container
+        docker buildx inspect --bootstrap
+
         # SKIP_ENV_VALIDATION because the build has no database, no Redis and no IAP
         # audience — the app validates its environment at boot, and a build box has none
         # of it. CI=true is what upstream's own Dockerfile passes.
-        docker build \
+        #
+        # --push rather than build-then-push: with the container driver the image lives in
+        # the builder, not in the daemon's image store, so a later `docker push` would not
+        # find it.
+        docker buildx build --push \
           --build-arg SKIP_ENV_VALIDATION=true \
           --build-arg CI=true \
           -t "$_IMAGE" .
-        docker push "$_IMAGE"
 
 # The build is a pnpm install plus a Next.js monorepo build. It was tried on quantumpc
 # first and pushed that machine to 1.6 GB free with 5.6 GB of swap in use, next to a live
 # Minecraft server — which is why it runs here instead.
+#
+# E2_HIGHCPU_32 and not _8, and the reason is in the log of the build that died:
+#
+#   ✓ Compiled successfully in 82s
+#   Collecting page data using 7 workers ...
+#   <nothing — INTERNAL_ERROR>
+#
+# Compilation is not the expensive part; the page-data pass is, because Next.js forks one
+# worker per CPU and each loads the application. On _8 that is 7 workers sharing 8 GB and
+# the worker VM dies with no message at all — INTERNAL_ERROR, which reads like a Cloud
+# Build fault rather than "you ran out of memory".
+#
+# The fix is FEWER CPUs, not more, and the second failure is what taught me that.
+#
+# _32 was the obvious reaction and it is quota-restricted in europe-west1 for this project
+# — which turned out to be a favour. Next.js forks one page-data worker per CPU, and every
+# E2_HIGHCPU size gives 1 GB per vCPU, so a bigger machine buys more workers competing for
+# proportionally the same memory. It would very likely have died the same way, slower.
+#
+# The default worker is 2 vCPU with 8 GB. Same total memory as _8, but ONE page-data worker
+# instead of seven. Compilation goes from 82 seconds to a few minutes, which costs nothing
+# for something built a handful of times a month.
+#
+# So: no machineType at all. If this ever needs to go faster, the lever is capping the
+# worker count in next.config.ts — upstream's file, and a registered touchpoint we have not
+# needed to spend.
 options:
-  machineType: E2_HIGHCPU_8
   logging: CLOUD_LOGGING_ONLY
 
 timeout: 2700s
