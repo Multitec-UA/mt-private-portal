@@ -3,6 +3,33 @@
 Things the code does not tell you and the UI does not explain, written down the first time
 each one cost somebody a round trip.
 
+## Ask the agent instead of clicking
+
+`bin/qpc-portal` in the quantumpc management repo administers all of this through Homarr's
+own tRPC API. Sergio, 2026-08-29: *"no estoy nunca delante del teclado."*
+
+```sh
+qpc-portal status                              # who the server thinks we are
+qpc-portal boards | groups | users
+qpc-portal permissions dashboard
+qpc-portal grant dashboard everyone view       # and --dry-run before it
+qpc-portal revoke dashboard everyone
+qpc-portal call board.getAllBoards             # anything else the API exposes
+```
+
+It signs in as `quantumpc-agent@…`, which the portal admits through
+`AUTH_IAP_SERVICE_ACCOUNTS` (see `packages/auth/providers/iap/service-accounts.ts`). The
+account appears in the user list like any other, which is deliberate: an administrator that
+does not show up in the members list is one nobody audits.
+
+**One sharp edge it handles so you do not have to.** `saveGroupBoardPermissions` deletes
+every group permission on the board and re-inserts what it is given. Calling it with only
+the group you are changing silently revokes everybody else — which looks like it worked.
+`qpc-portal grant` reads the current set and merges.
+
+The UI below still works and is still the right answer for a human at a keyboard. Both write
+the same rows.
+
 ## A new board is invisible to members until you say otherwise
 
 **Symptom.** An administrator builds a board, sees it perfectly, and every ordinary member
