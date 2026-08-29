@@ -40,7 +40,20 @@ DIRECTORY = "https://admin.googleapis.com/admin/directory/v1"
 
 
 def access_token(key: dict, subject: str) -> str:
-    """Domain-wide delegation: sign a JWT asserting `subject`, exchange it for a token."""
+    """Domain-wide delegation: sign a JWT asserting `subject`, exchange it for a token.
+
+    **`subject` must be a real user, never a group address.** A group cannot be
+    impersonated, and Google reports that attempt as `unauthorized_client` — character for
+    character the same error as a scope that was never granted, or one that was revoked.
+
+    That cost a sibling session an hour on 2026-08-29: it switched the subject from a
+    mailbox to a group address and read the denial as the whole delegation having been
+    wiped, which nearly led to a manual repair of the Admin console that would have caused
+    the very outage it was preventing. Same client, same scopes, one minute apart, varying
+    only the subject: both mailboxes succeeded, the group was refused.
+
+    So when this starts failing, check the subject before you touch the Admin console.
+    """
     now = int(time.time())
     assertion = jwt.encode(
         {
