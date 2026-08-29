@@ -64,16 +64,22 @@ export const env = createEnv({
           // Asserted when the assertion carries `hd`, never demanded — a service account's
           // assertion has no `hd` at all. Measured, see docs/multitec/reports/0001.
           AUTH_IAP_HOSTED_DOMAIN: z.string().optional(),
-          // Who gets the admin group. Server-side only: nothing in the request participates.
-          AUTH_IAP_ADMIN_EMAILS: z
-            .string()
-            .default("")
-            .transform((value) =>
-              value
-                .split(",")
-                .map((entry) => entry.trim().toLowerCase())
-                .filter(Boolean),
-            ),
+          // Who gets the admin group, and it is NOT a list of addresses.
+          //
+          // This path is a JSON export of a Google Workspace group's membership, written by
+          // a scheduled job and mounted read-only. Sergio's instruction, 2026-08-29: the
+          // association already manages who is who in Workspace, and "who can edit the
+          // portal" should not be a line in Terraform that somebody has to remember.
+          //
+          // The portal therefore holds no Workspace credential — a domain-wide-delegated
+          // key can impersonate the whole domain and has no business in a web-facing
+          // container. Same split as the Minecraft allowlist: one job with the credential,
+          // one service reading bytes.
+          AUTH_IAP_ADMIN_SOURCE: z.string().min(1).default("/admins/admins.json"),
+          // Long enough that a login is not a file read every time, short enough that
+          // adding somebody to the Workspace group takes effect while they are still
+          // wondering whether it worked.
+          AUTH_IAP_ADMIN_CACHE_SECONDS: z.coerce.number().min(0).max(3600).default(60),
           // These must already exist in Homarr — group sync joins existing groups and never
           // creates one, so a name that does not exist is silently nothing.
           AUTH_IAP_ADMIN_GROUP: z.string().min(1).default("admins"),

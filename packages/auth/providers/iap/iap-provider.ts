@@ -6,7 +6,7 @@ import type { Database, InferInsertModel } from "@homarr/db";
 import { and, eq } from "@homarr/db";
 import { users } from "@homarr/db/schema";
 
-import { resolveGroupsForEmail } from "./resolve-groups";
+import { resolveGroupsForEmailAsync } from "./resolve-groups";
 import { IAP_ASSERTION_HEADER, IAP_EMAIL_HEADER, verifyIapAssertionAsync } from "./verify-assertion";
 
 const logger = createLogger({ module: "iapProvider" });
@@ -79,7 +79,7 @@ export const createIapConfiguration = (db: Database) =>
         user = insertUser;
       }
 
-      const groups = resolveGroupsForEmail(email);
+      const groups = await resolveGroupsForEmailAsync(email);
 
       logger.info("IAP sign-in accepted", { email, groups: groups.length });
 

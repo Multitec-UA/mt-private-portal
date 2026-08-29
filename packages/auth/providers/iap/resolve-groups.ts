@@ -1,28 +1,95 @@
+import { readFile } from "node:fs/promises";
+
+import { createLogger } from "@homarr/core/infrastructure/logs";
+
 import { env } from "../../env";
+
+const logger = createLogger({ module: "iapGroups" });
 
 /**
  * Which Homarr groups an IAP-authenticated member belongs to.
  *
  * The one rule this file exists to keep: **nothing the browser can influence decides
  * admin-ness.** Not a claim in the assertion, not a header, not a field on the user's own
- * profile. The answer comes from configuration this process was started with, so the worst
- * a malicious member can do is be themselves.
+ * profile. The answer comes from a file this process reads off disk.
  *
- * Today that configuration is an env allowlist, which is what `minecraft-allowlist` already
- * uses and is enough for a junta of a handful of people. The interface is a function of the
- * email precisely so the Workspace Directory API can replace it later — membership of
- * `junta@multitecua.com` *being* the admin list, with nobody editing an env var to add a
- * board editor. See ADR 0002 §2.
+ * That file is the membership of a **Google Workspace group** — `homarr-admin@multitecua.com`
+ * — exported by a scheduled job and mounted read-only. Sergio asked for it that way on
+ * 2026-08-29, and he is right: an env list of addresses means "who can edit the portal" is
+ * maintained in Terraform, by whoever remembers, in a place nobody looks. A Workspace group
+ * is where the association already manages who is who, and adding somebody to it is
+ * something a junta member can do without touching infrastructure.
  *
- * Note what the returned names must be: Homarr's sign-in event adds the user to groups that
- * **already exist by name** and removes them from the rest. It never creates a group. So a
- * name that does not exist in Homarr is silently nothing, which is the failure mode to watch
- * for when somebody swears they should be an admin.
+ * Why a mounted file rather than an API call at login: the portal then holds no Workspace
+ * credential at all. A domain-wide-delegated key can impersonate users across the domain,
+ * and it has no business living in a web-facing container. The same split the Minecraft
+ * allowlist already uses — one job with the credential, one service that just reads bytes.
+ *
+ * **It fails closed.** If the file is missing, unreadable or malformed, nobody is an admin.
+ * The failure is loud in the logs and it self-heals: once the file is readable, the next
+ * sign-in grants the group again, because Homarr re-synchronises membership on every login.
  */
-export const resolveGroupsForEmail = (email: string): string[] => {
+
+interface AdminSource {
+  /** Lower-cased member addresses of the admin group. */
+  members?: string[];
+  /** When the sync job wrote it, for the log line that tells you it has gone stale. */
+  syncedAt?: string;
+}
+
+interface CacheEntry {
+  members: Set<string>;
+  readAt: number;
+}
+
+let cache: CacheEntry | null = null;
+
+/** Exported for the tests; nothing else should need it. */
+export const resetAdminCacheForTests = () => {
+  cache = null;
+};
+
+const readAdminsAsync = async (): Promise<Set<string>> => {
+  const ttlMs = env.AUTH_IAP_ADMIN_CACHE_SECONDS * 1000;
+  if (cache && Date.now() - cache.readAt < ttlMs) {
+    return cache.members;
+  }
+
+  try {
+    const raw = await readFile(env.AUTH_IAP_ADMIN_SOURCE, "utf8");
+    const parsed = JSON.parse(raw) as AdminSource;
+    const members = new Set(
+      (parsed.members ?? []).map((entry) => entry.trim().toLowerCase()).filter(Boolean),
+    );
+
+    if (members.size === 0) {
+      // Not fatal — a group can legitimately be empty — but it is worth saying out loud,
+      // because "nobody is an admin" is indistinguishable from a broken sync at the moment
+      // somebody is trying to administer the portal.
+      logger.warn("The admin group export lists no members", {
+        source: env.AUTH_IAP_ADMIN_SOURCE,
+        syncedAt: parsed.syncedAt,
+      });
+    }
+
+    cache = { members, readAt: Date.now() };
+    return members;
+  } catch (error) {
+    logger.error("Could not read the admin group export — granting nobody admin", {
+      source: env.AUTH_IAP_ADMIN_SOURCE,
+      detail: error instanceof Error ? error.message : "unknown",
+    });
+    // Deliberately not cached: a transient read failure should not lock admins out for the
+    // whole TTL, and the next sign-in retries.
+    return new Set();
+  }
+};
+
+export const resolveGroupsForEmailAsync = async (email: string): Promise<string[]> => {
   const groups: string[] = [];
 
-  if (env.AUTH_IAP_ADMIN_EMAILS.includes(email.toLowerCase())) {
+  const admins = await readAdminsAsync();
+  if (admins.has(email.toLowerCase())) {
     groups.push(env.AUTH_IAP_ADMIN_GROUP);
   }
 

@@ -5,6 +5,10 @@
 // signature in this file failed with "payload must be an instance of Uint8Array" before
 // the verifier was ever reached. Node is also the runtime this code actually runs in.
 
+import { rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+
 import { exportJWK, generateKeyPair, SignJWT } from "jose";
 import { beforeEach, describe, expect, test, vi } from "vitest";
 
@@ -24,7 +28,8 @@ const mockEnv = vi.hoisted(() => ({
   AUTH_IAP_AUDIENCE: "/projects/1234/locations/europe-west1/services/mt-portal",
   AUTH_IAP_HOSTED_DOMAIN: "multitecua.com" as string | undefined,
   AUTH_IAP_CLOCK_TOLERANCE_SECONDS: 30,
-  AUTH_IAP_ADMIN_EMAILS: ["boss@multitecua.com"],
+  AUTH_IAP_ADMIN_SOURCE: "/tmp/never-used-placeholder.json",
+  AUTH_IAP_ADMIN_CACHE_SECONDS: 0,
   AUTH_IAP_ADMIN_GROUP: "admins",
   AUTH_IAP_MEMBER_GROUP: undefined as string | undefined,
 }));
@@ -52,7 +57,14 @@ vi.stubGlobal(
 );
 
 const { stripNamespace, verifyIapAssertionAsync } = await import("../iap/verify-assertion");
-const { resolveGroupsForEmail } = await import("../iap/resolve-groups");
+const { resolveGroupsForEmailAsync, resetAdminCacheForTests } = await import("../iap/resolve-groups");
+
+// A real file on disk, because the point of the design is that the portal reads bytes
+// rather than calling an API — and "what happens when the file is missing or malformed" is
+// the half of it that decides whether a broken sync locks the junta out or just logs.
+const adminFile = join(tmpdir(), `iap-admins-${process.pid}.json`);
+const writeAdmins = (body: unknown) => writeFileSync(adminFile, JSON.stringify(body));
+mockEnv.AUTH_IAP_ADMIN_SOURCE = adminFile;
 
 interface TokenOptions {
   key?: CryptoKey;
@@ -206,19 +218,62 @@ describe("stripNamespace", () => {
   });
 });
 
-describe("resolveGroupsForEmail", () => {
-  test("gives the admin group only to a listed address", () => {
-    expect(resolveGroupsForEmail("boss@multitecua.com")).toEqual(["admins"]);
-    expect(resolveGroupsForEmail("member@multitecua.com")).toEqual([]);
+describe("resolveGroupsForEmailAsync", () => {
+  beforeEach(() => {
+    resetAdminCacheForTests();
+    writeAdmins({ members: ["boss@multitecua.com"], syncedAt: "2026-08-29T00:00:00Z" });
   });
 
-  test("matches the allowlist regardless of case", () => {
-    expect(resolveGroupsForEmail("BOSS@multitecua.com")).toEqual(["admins"]);
+  test("gives the admin group only to a member of the exported group", async () => {
+    expect(await resolveGroupsForEmailAsync("boss@multitecua.com")).toEqual(["admins"]);
+    expect(await resolveGroupsForEmailAsync("member@multitecua.com")).toEqual([]);
   });
 
-  test("adds the member group to everyone when one is configured", () => {
+  test("matches regardless of case on either side", async () => {
+    writeAdmins({ members: ["BOSS@Multitecua.com"] });
+    expect(await resolveGroupsForEmailAsync("boss@multitecua.com")).toEqual(["admins"]);
+    resetAdminCacheForTests();
+    expect(await resolveGroupsForEmailAsync("BOSS@MULTITECUA.COM")).toEqual(["admins"]);
+  });
+
+  test("adds the member group to everyone when one is configured", async () => {
     mockEnv.AUTH_IAP_MEMBER_GROUP = "socios";
-    expect(resolveGroupsForEmail("member@multitecua.com")).toEqual(["socios"]);
-    expect(resolveGroupsForEmail("boss@multitecua.com")).toEqual(["admins", "socios"]);
+    expect(await resolveGroupsForEmailAsync("member@multitecua.com")).toEqual(["socios"]);
+    expect(await resolveGroupsForEmailAsync("boss@multitecua.com")).toEqual(["admins", "socios"]);
+  });
+
+  test("fails CLOSED when the export is missing", async () => {
+    // The important direction. A sync job that has never run, or a volume that failed to
+    // mount, must not hand the portal to whoever signs in next.
+    rmSync(adminFile, { force: true });
+    resetAdminCacheForTests();
+    expect(await resolveGroupsForEmailAsync("boss@multitecua.com")).toEqual([]);
+  });
+
+  test("fails closed on a malformed export rather than throwing", async () => {
+    // A half-written file during a sync is a normal event, not an exception. Throwing here
+    // would turn it into a failed login instead of a login without admin rights.
+    writeFileSync(adminFile, "{ this is not json");
+    resetAdminCacheForTests();
+    expect(await resolveGroupsForEmailAsync("boss@multitecua.com")).toEqual([]);
+  });
+
+  test("an empty group is honoured, not treated as broken", async () => {
+    writeAdmins({ members: [] });
+    resetAdminCacheForTests();
+    expect(await resolveGroupsForEmailAsync("boss@multitecua.com")).toEqual([]);
+  });
+
+  test("a read failure is not cached, so recovery does not wait for the TTL", async () => {
+    mockEnv.AUTH_IAP_ADMIN_CACHE_SECONDS = 3600;
+    rmSync(adminFile, { force: true });
+    resetAdminCacheForTests();
+    expect(await resolveGroupsForEmailAsync("boss@multitecua.com")).toEqual([]);
+
+    // The sync job catches up. Without the "do not cache failures" rule this would stay
+    // broken for an hour, which is exactly when somebody is trying to fix it.
+    writeAdmins({ members: ["boss@multitecua.com"] });
+    expect(await resolveGroupsForEmailAsync("boss@multitecua.com")).toEqual(["admins"]);
+    mockEnv.AUTH_IAP_ADMIN_CACHE_SECONDS = 0;
   });
 });
