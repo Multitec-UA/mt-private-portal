@@ -133,6 +133,7 @@ catalog:
   ioredis: 5.11.1
   isomorphic-dompurify: ^3.18.0
   jotai: ^2.20.1
+  jose: ^6.2.3
   jsdom: ^29.1.1
   json5: ^2.2.3
   jsonpath-plus: ^10.4.0

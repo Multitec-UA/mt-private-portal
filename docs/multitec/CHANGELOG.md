@@ -11,6 +11,75 @@ was verified afterwards.
 
 ---
 
+## 2026-08-29 — sign in with the identity IAP already proved
+
+**What.** The `iap` auth provider (ADR 0002), so a socio opens the portal and is simply in.
+No form, no password, no second identity system.
+
+**The shape.** A credentials-shaped provider, because `authorize()` is the only hook in
+Auth.js that receives the request — and the request is where IAP puts the assertion. An
+`oauth` provider would redirect the browser to an identity provider it has already been
+through.
+
+Three new files carry everything that matters, all pure functions of their inputs:
+
+- `verify-assertion.ts` — signature (ES256, pinned), issuer, **exact audience**, expiry,
+  hosted domain, and the signed-versus-unsigned email cross-check.
+- `resolve-groups.ts` — email to Homarr groups. One rule: **nothing the browser can
+  influence decides admin-ness.**
+- `iap-provider.ts` — the `authorize()` callback and first-sign-in user creation.
+
+Group membership then costs **zero** upstream change: `events.ts` already synchronises
+groups for any provider whose user object carries `groups: string[]`, a branch written for
+LDAP and never made LDAP-specific.
+
+**Two things the spike changed before a line was written.** `AUTH_IAP_AUDIENCE` has no
+default anywhere in the stack, because a wrong audience accepts assertions minted for a
+different IAP-protected Multitec service. And `hd` is asserted when present and never
+demanded — ADR 0002 said to require it, and the spike measured a real service-account
+assertion arriving without it, which would have refused every machine caller the portal
+ever gains.
+
+**Tests attack it rather than demonstrate it.** Each case signs a real ES256 token with a
+key the test controls, against a JWKS the test serves, because an attacker does not send a
+malformed string — they send a well-formed token that is wrong in exactly one way. Right
+issuer, right audience, right claims, wrong key: refused. An audience for `mt-mc-map`
+replayed here: refused. Signed and unsigned emails disagreeing: refused, loudly.
+
+**`jose` is declared, not inherited.** It is already in the tree under `@auth/core`, and
+pnpm's hoisted layout would resolve an undeclared import today — and break silently the day
+that transitive dependency moves. Not a gamble worth taking on the code that verifies logins.
+
+### The guard was wrong twice, and both were the same mistake
+
+Writing this found two holes in `upstream-guard.sh`, and they share a root cause: asking git
+a narrower question than the one you mean.
+
+1. **It compared against `HEAD`**, so run before committing — exactly when you want it — it
+   reported on a state that was not the one on disk, and called a dozen edited files
+   "identical to upstream".
+2. **`git diff` never lists untracked files**, so a brand-new provider or test was invisible
+   until somebody remembered to `git add` it. That is the most common thing this fork adds.
+
+Both fixed, both now asserted, including that gitignored files stay out of it.
+
+### And the budget was one number for two risks
+
+With everything visible the guard said **13 touched, limit 12** — doing its job. But the
+model was wrong: a file we *add* at a path upstream does not have cannot conflict, because
+git only conflicts over lines two sides both changed. A file we *modify* conflicts every
+time upstream touches those lines.
+
+So modifications keep the tight budget and additions get a looser one of their own. **This
+was changed while it was blocking my own work, which is the moment to be suspicious of
+oneself** — the reasoning is in the script rather than only in a commit message, and both
+directions are asserted: added files do not consume the modified budget, and they still
+have a cap, because "we only added files" is how a fork quietly becomes a rewrite.
+
+Guard self-tests: **22 PASS, 0 FAIL**.
+
+---
+
 ## 2026-08-28 — the deployment design was wrong, and correcting it made it cheaper
 
 **What.** Sergio read the first analysis and corrected four things. ADR 0003 is new,

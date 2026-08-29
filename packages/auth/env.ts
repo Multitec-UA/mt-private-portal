@@ -52,6 +52,38 @@ export const env = createEnv({
             .default("client_secret_basic"),
         }
       : {}),
+    ...(authProviders.includes("iap")
+      ? {
+          // The exact IAP resource string. NO DEFAULT, on purpose: a wrong audience is the
+          // one mistake here that fails open in spirit — it would accept assertions minted
+          // for a different IAP-protected service. Better to refuse to start.
+          // For IAP enabled directly on a Cloud Run service (which is our shape — there is
+          // no load balancer) it is:
+          //   /projects/<PROJECT_NUMBER>/locations/<REGION>/services/<SERVICE_NAME>
+          AUTH_IAP_AUDIENCE: z.string().min(1),
+          // Asserted when the assertion carries `hd`, never demanded — a service account's
+          // assertion has no `hd` at all. Measured, see docs/multitec/reports/0001.
+          AUTH_IAP_HOSTED_DOMAIN: z.string().optional(),
+          // Who gets the admin group. Server-side only: nothing in the request participates.
+          AUTH_IAP_ADMIN_EMAILS: z
+            .string()
+            .default("")
+            .transform((value) =>
+              value
+                .split(",")
+                .map((entry) => entry.trim().toLowerCase())
+                .filter(Boolean),
+            ),
+          // These must already exist in Homarr — group sync joins existing groups and never
+          // creates one, so a name that does not exist is silently nothing.
+          AUTH_IAP_ADMIN_GROUP: z.string().min(1).default("admins"),
+          AUTH_IAP_MEMBER_GROUP: z.string().optional(),
+          AUTH_IAP_AUTO_LOGIN: createBooleanSchema(true),
+          // An IAP assertion lives ~600s. This is only for clock drift between Google and
+          // this container, not a way to accept stale tokens.
+          AUTH_IAP_CLOCK_TOLERANCE_SECONDS: z.coerce.number().min(0).max(300).default(30),
+        }
+      : {}),
     ...(authProviders.includes("ldap")
       ? {
           AUTH_LDAP_URI: z.string().url(),

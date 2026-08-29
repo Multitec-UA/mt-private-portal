@@ -114,7 +114,7 @@ echo "our change" >>"$d/packages/auth/configuration.ts"
 register "$d" "packages/auth/configuration.ts"
 commit_all "$d"
 run_guard "$d"
-expect "registered modification passes" 0 "1 upstream file(s) touched"
+expect "registered modification passes" 0 "1 modified (budget 12)"
 rm -rf "$d"
 
 # --- 5. generated files are refused even when registered --------------------------------
@@ -151,7 +151,24 @@ commit_all "$d"
 run_guard "$d" MAX_TOUCHED=1
 expect "exceeding the budget fails" 1 "limit is 1"
 run_guard "$d" MAX_TOUCHED=2
-expect "sitting exactly on the budget passes" 0 "budget 2"
+expect "sitting exactly on the budget passes" 0 "2 modified (budget 2)"
+rm -rf "$d"
+
+# --- 7b. the two budgets bound different things -----------------------------------------
+# Added files cannot conflict (upstream has no file at that path to change); modified files
+# can, every release. One number for both said a new test costs as much to merge as an edit
+# to configuration.ts. These assert the split holds in both directions.
+d=$(scratch)
+mkdir -p "$d/packages/auth/iap"
+echo "a" >"$d/packages/auth/iap/one.ts"
+echo "b" >"$d/packages/auth/iap/two.ts"
+echo "c" >"$d/packages/auth/iap/three.ts"
+register "$d" "packages/auth/iap/one.ts" "packages/auth/iap/two.ts" "packages/auth/iap/three.ts"
+commit_all "$d"
+run_guard "$d" MAX_TOUCHED=0
+expect "added files do not consume the modified budget" 0 "0 modified"
+run_guard "$d" MAX_ADDED=2
+expect "...but they have a budget of their own" 1 "ADDED inside upstream"
 rm -rf "$d"
 
 # --- 8. a brand new file inside upstream's tree still needs registering ------------------
@@ -182,6 +199,53 @@ d=$(mktemp -d)
 output=$(cd "$d" && bash "$guard" 2>&1)
 rc=$?
 expect "running outside a git repository exits 2" 2 "not inside a git repository"
+rm -rf "$d"
+
+# --- 9b. uncommitted work counts ---------------------------------------------------------
+# The bug this catches, met on 2026-08-29: the guard compared against HEAD, so running it
+# before committing reported "identical to upstream" for a dozen files that were edited on
+# disk. It has to see what is there, not what has been recorded.
+d=$(scratch)
+echo "our change" >>"$d/packages/auth/configuration.ts"   # NOT committed
+run_guard "$d"
+expect "an uncommitted modification is still caught" 1 "without registering it"
+
+register "$d" "packages/auth/configuration.ts"            # registry also uncommitted
+run_guard "$d"
+expect "...and passes once registered, still uncommitted" 0 "OK"
+rm -rf "$d"
+
+# --- 9c. untracked files count too -------------------------------------------------------
+# The second half of the same bug: `git diff` never lists untracked files, so a brand-new
+# provider or test — the most common thing this fork adds — was invisible to the guard
+# until somebody remembered to `git add` it.
+d=$(scratch)
+mkdir -p "$d/packages/auth/iap"
+echo "new" >"$d/packages/auth/iap/provider.ts"            # never added to the index
+run_guard "$d"
+expect "an untracked file inside upstream's tree is caught" 1 "new file inside upstream's tree"
+
+register "$d" "packages/auth/iap/provider.ts"
+run_guard "$d"
+expect "...and passes once registered, still untracked" 0 "OK"
+rm -rf "$d"
+
+# ...but an ignored file is not our business: node_modules is not a fork divergence.
+# The .gitignore itself is a new file in upstream's tree, so it is registered — the first
+# version of this test forgot that and failed on its own scaffolding rather than on the
+# thing it meant to measure.
+d=$(scratch)
+printf 'node_modules/\n' >"$d/.gitignore"
+mkdir -p "$d/node_modules/left-pad"
+echo "junk" >"$d/node_modules/left-pad/index.js"
+register "$d" ".gitignore"
+run_guard "$d"
+expect "gitignored files are not reported as divergence" 0 "OK"
+if grep -q 'node_modules' <<<"$output"; then
+  ko "gitignored files: node_modules leaked into the report"
+else
+  ok "gitignored files: node_modules is not mentioned at all"
+fi
 rm -rf "$d"
 
 # --- 10. a rename of an upstream file is flagged ----------------------------------------

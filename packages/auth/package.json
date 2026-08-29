@@ -32,6 +32,7 @@
     "@homarr/validation": "workspace:^0.1.0",
     "bcrypt": "catalog:",
     "cookies": "catalog:",
+    "jose": "catalog:",
     "ldapts": "catalog:",
     "next": "catalog:",
     "next-auth": "catalog:",

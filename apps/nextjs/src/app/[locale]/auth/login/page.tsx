@@ -52,6 +52,7 @@ export default async function Login(props: LoginProps) {
             providers={env.AUTH_PROVIDERS}
             oidcClientName={env.AUTH_OIDC_CLIENT_NAME}
             isOidcAutoLoginEnabled={env.AUTH_OIDC_AUTO_LOGIN}
+            isIapAutoLoginEnabled={env.AUTH_IAP_AUTO_LOGIN}
             callbackUrl={searchParams.callbackUrl ?? "/"}
           />
         </Card>

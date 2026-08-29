@@ -21,6 +21,11 @@ export const isGroupMembershipManagedLocally = (provider: SupportedAuthProvider)
       return true;
     case "oidc":
       return env.AUTH_OIDC_GROUPS_LOCAL_MANAGEMENT;
+    // Membership comes from the admin allowlist this process was started with, so it is
+    // externally managed and must not be editable in the UI: an edit there would be undone
+    // at the member's next sign-in, which is worse than the field being absent.
+    case "iap":
+      return false;
     default:
       // ldap + any provider added later: externally managed (synced, not editable
       // here) until explicitly given a case above. New providers safe-by-default.

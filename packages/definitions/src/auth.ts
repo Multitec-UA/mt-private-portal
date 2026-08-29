@@ -1,2 +1,2 @@
-export const supportedAuthProviders = ["credentials", "oidc", "ldap"] as const;
+export const supportedAuthProviders = ["credentials", "oidc", "ldap", "iap"] as const;
 export type SupportedAuthProvider = (typeof supportedAuthProviders)[number];

@@ -47,6 +47,10 @@ const extractProvider = (req: NextRequest): SupportedAuthProvider | "unknown" =>
     return "ldap";
   }
 
+  if (url.pathname.includes("iap")) {
+    return "iap";
+  }
+
   return "unknown";
 };
 

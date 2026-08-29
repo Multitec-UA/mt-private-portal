@@ -23,12 +23,30 @@ therefore not optional.
 ## The list
 
 <!-- BEGIN REGISTRY -->
+- `packages/definitions/src/auth.ts` — one entry added to the `supportedAuthProviders` tuple, so `AUTH_PROVIDERS=iap` parses. Lowest-risk shape there is: the end of a literal.
+- `packages/auth/env.ts` — an `authProviders.includes("iap")` block, parallel to the oidc and ldap ones. `AUTH_IAP_AUDIENCE` deliberately has no default: a wrong audience would accept assertions minted for a different IAP-protected service.
+- `packages/auth/configuration.ts` — three small hunks: an import, one entry appended to `filterProviders([...])`, and `"iap"` added to the credentials-session guard. The guard matters most: Auth.js does not create a database session for a credentials-shaped provider, so leaving it out is a successful sign-in that produces no session.
+- `packages/auth/providers/check-provider.ts` — a `case "iap"` returning false in `isGroupMembershipManagedLocally`. Membership comes from the admin allowlist, so a UI edit would be silently undone at the next sign-in.
+- `packages/auth/providers/iap/verify-assertion.ts` — new. The security core: signature, issuer, audience, expiry, hosted domain, and the signed/unsigned cross-check.
+- `packages/auth/providers/iap/resolve-groups.ts` — new. Email to Homarr groups. The one rule: nothing the browser can influence decides admin-ness.
+- `packages/auth/providers/iap/iap-provider.ts` — new. The `authorize()` callback and first-sign-in user creation.
+- `packages/auth/providers/test/iap-assertion.spec.ts` — new. Signs real ES256 tokens with a key the test controls and attacks the verifier with them.
+- `apps/nextjs/src/app/api/auth/[...nextauth]/route.ts` — an `iap` branch in `extractProvider`, parallel to the existing three.
+- `apps/nextjs/src/app/[locale]/auth/login/page.tsx` — one more prop passed to the form.
+- `apps/nextjs/src/app/[locale]/auth/login/_login-form.tsx` — the auto-login effect extended to fire `signIn("iap")`. The most volatile of these: it is UI, and upstream changes login pages more often than auth packages. If it becomes painful, the auto-login can move to `proxy.ts` and this hunk disappears.
+- `packages/auth/package.json` — `jose` declared as a dependency.
+- `pnpm-workspace.yaml` — the matching `jose: ^6.2.3` catalog entry.
+- `pnpm-lock.yaml` — the by-product of the two above. Never hand-edited: on a sync, take upstream's and re-run `pnpm install`.
 <!-- END REGISTRY -->
 
-*(Empty. As of the fork point, this repository differs from `upstream/dev` only by files
-we created: `MULTITEC.md`, `CLAUDE.md`, `docs/multitec/**` and
-`.agents/skills/multitec-*`. That is the ideal state and it will not last — but every
-departure from it should be a decision someone made on purpose.)*
+**Fourteen entries, of which six are new files in a directory upstream does not have.** The
+eight that genuinely modify upstream code are each a handful of lines at a stable anchor —
+the end of a tuple, one more entry in an array, an extra `case`, one more prop.
+
+`jose` is declared rather than inherited on purpose. It is already in the tree as a
+transitive dependency of `@auth/core`, and with pnpm's hoisted layout an undeclared import
+would resolve today — and break silently the day that transitive dependency moves. Not a
+gamble worth taking on the code that verifies logins.
 
 ## Expected entries when the IAP work lands
 

@@ -16,18 +16,25 @@ import { useScopedI18n } from "@homarr/translation/client";
 import { sanitizeRedirectionUrl } from "@homarr/validation/redirection-url";
 import { userSignInSchema } from "@homarr/validation/user";
 
-type Provider = "credentials" | "ldap" | "oidc";
+type Provider = "credentials" | "ldap" | "oidc" | "iap";
 
 interface LoginFormProps {
   providers: string[];
   oidcClientName: string;
   isOidcAutoLoginEnabled: boolean;
+  isIapAutoLoginEnabled?: boolean;
   callbackUrl: string;
 }
 
 const extendedValidation = userSignInSchema.extend({ provider: z.enum(["credentials", "ldap"]) });
 
-export const LoginForm = ({ providers, oidcClientName, isOidcAutoLoginEnabled, callbackUrl }: LoginFormProps) => {
+export const LoginForm = ({
+  providers,
+  oidcClientName,
+  isOidcAutoLoginEnabled,
+  isIapAutoLoginEnabled,
+  callbackUrl,
+}: LoginFormProps) => {
   const t = useScopedI18n("user");
   const searchParams = useSearchParams();
   const isError = searchParams.has("error");
@@ -104,11 +111,23 @@ export const LoginForm = ({ providers, oidcClientName, isOidcAutoLoginEnabled, c
 
   useEffect(() => {
     if (isError) return;
-    if (isOidcAutoLoginEnabled && !isPending && !isLoginInProgress.current) {
+    if (isPending || isLoginInProgress.current) return;
+
+    // IAP first: when it is enabled the member has already been authenticated by Google
+    // before this page rendered, so the correct behaviour is to sign them in and get out
+    // of the way. Unlike oidc this does not redirect — `iap` is credentials-shaped, so
+    // the post returns a session cookie and the callback url is followed directly.
+    if (isIapAutoLoginEnabled && providers.includes("iap")) {
+      isLoginInProgress.current = true;
+      void signInAsync("iap");
+      return;
+    }
+
+    if (isOidcAutoLoginEnabled) {
       isLoginInProgress.current = true;
       void signInAsync("oidc");
     }
-  }, [signInAsync, isOidcAutoLoginEnabled, isPending, isError]);
+  }, [signInAsync, isOidcAutoLoginEnabled, isIapAutoLoginEnabled, providers, isPending, isError]);
 
   return (
     <Stack gap="xl">

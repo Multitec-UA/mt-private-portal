@@ -14,6 +14,7 @@ import { createSignInEventHandler } from "./events";
 import { createCredentialsConfiguration, createLdapConfiguration } from "./providers/credentials/credentials-provider";
 import { EmptyNextAuthProvider } from "./providers/empty/empty-provider";
 import { filterProviders } from "./providers/filter-providers";
+import { createIapConfiguration } from "./providers/iap/iap-provider";
 import { OidcProvider } from "./providers/oidc/oidc-provider";
 import { createRedirectUri } from "./redirect";
 import { expireDateAfter, generateSessionToken, sessionTokenCookieName } from "./session";
@@ -66,6 +67,7 @@ export const createConfiguration = (
       Credentials(createLdapConfiguration(db)),
       EmptyNextAuthProvider(),
       OidcProvider(headers),
+      Credentials(createIapConfiguration(db)),
     ]),
     callbacks: {
       session: createSessionCallback(db),
@@ -75,7 +77,11 @@ export const createConfiguration = (
          * For credentials provider only jwt is supported by default
          * so we have to create the session and set the cookie manually.
          */
-        if (provider !== "credentials" && provider !== "ldap") {
+        // `iap` joins these two because it is credentials-shaped: Auth.js does not
+        // create a database session for that kind of provider, so the block below mints
+        // one. Leaving it out means a successful sign-in that produces no session, which
+        // looks exactly like a silent login failure.
+        if (provider !== "credentials" && provider !== "ldap" && provider !== "iap") {
           return true;
         }
 
