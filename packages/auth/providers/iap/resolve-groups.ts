@@ -3,6 +3,7 @@ import { readFile } from "node:fs/promises";
 import { createLogger } from "@homarr/core/infrastructure/logs";
 
 import { env } from "../../env";
+import { isMachineAdministrator } from "./service-accounts";
 
 const logger = createLogger({ module: "iapGroups" });
 
@@ -87,6 +88,19 @@ const readAdminsAsync = async (): Promise<Set<string>> => {
 
 export const resolveGroupsForEmailAsync = async (email: string): Promise<string[]> => {
   const groups: string[] = [];
+
+  /**
+   * A configured machine administrator is an admin without consulting the export, and
+   * deliberately so: the export is a mounted file that can be absent, stale or empty, and
+   * the agent's whole purpose is to still be able to fix the portal when something like
+   * that has gone wrong. It is also not in the export by construction — the sync job drops
+   * `.gserviceaccount.com` members, because a service account is not a person who
+   * administers the association.
+   */
+  if (isMachineAdministrator(email)) {
+    logger.info("Granting admin to a configured machine administrator", { email });
+    return [env.AUTH_IAP_ADMIN_GROUP];
+  }
 
   const admins = await readAdminsAsync();
   if (admins.has(email.toLowerCase())) {

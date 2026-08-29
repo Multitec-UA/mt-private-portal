@@ -84,6 +84,11 @@ export const env = createEnv({
           // creates one, so a name that does not exist is silently nothing.
           AUTH_IAP_ADMIN_GROUP: z.string().min(1).default("admins"),
           AUTH_IAP_MEMBER_GROUP: z.string().optional(),
+          // Machine identities allowed to administer the portal, comma-separated, empty by
+          // default. Only `*.gserviceaccount.com` addresses are honoured; anything else is
+          // dropped and logged, so this cannot be used to walk a human address from another
+          // Workspace past AUTH_IAP_HOSTED_DOMAIN. See providers/iap/service-accounts.ts.
+          AUTH_IAP_SERVICE_ACCOUNTS: z.string().default(""),
           AUTH_IAP_AUTO_LOGIN: createBooleanSchema(true),
           // An IAP assertion lives ~600s. This is only for clock drift between Google and
           // this container, not a way to accept stale tokens.

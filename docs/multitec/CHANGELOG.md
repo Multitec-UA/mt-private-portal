@@ -11,6 +11,57 @@ was verified afterwards.
 
 ---
 
+## 2026-08-29 — the agent administers the portal through its own API
+
+**What.** `AUTH_IAP_SERVICE_ACCOUNTS`: an explicit, empty-by-default list of Google service
+accounts that may sign in and are granted the admin group. Plus a test stage in
+`cloudbuild.yaml`, so our tests run in Google before the image is built.
+
+**Why.** Sergio, 2026-08-29: *"quiero que obtengas control total de la administración y
+edición… sin que tenga que yo meterme en la página web… no estoy nunca delante del
+teclado."* Everything he might ask for — boards, permissions, groups, users — is reachable
+through Homarr's tRPC API at `/api/trpc/<procedure>`, which accepts a session cookie or an
+`ApiKey` header. The agent had neither, and the supported way to get one is to sign in.
+
+The alternative was writing to the database directly, which this fork does not do: the same
+row written by the UI is written with none of the UI's invariants, and it leaves no trace in
+Homarr's own audit surface.
+
+**The security argument, because this is the one path that walks past the domain check.**
+
+- **Only `*.gserviceaccount.com` addresses are ever honoured.** Any other entry is dropped
+  and logged at error level. That is what stops the list being used to walk a human address
+  from another Workspace past `AUTH_IAP_HOSTED_DOMAIN` — the precise thing that check is
+  for.
+- **Exact match**, never a domain or a prefix.
+- **A listed account presenting `hd` is refused** as impersonation. A service account never
+  carries that claim; both at once is not a shape anything legitimate produces.
+- **IAP still gates the door.** A listed account that is not an IAP member never reaches the
+  process; membership lives in `settings/multitecweb.yaml`.
+- **Signature, issuer, audience and expiry are untouched.** Being on the list changes the
+  domain check and nothing else.
+
+**Evidence.** Ten new cases in `iap-assertion.spec.ts`, the first of which is the regression
+that matters most — with the variable unset, a service account is still refused:
+
+```
+docker run --rm -v $PWD:/w -w /w -e CI=true -e NODE_ENV=development node:22-alpine \
+  node node_modules/vitest/vitest.mjs run packages/auth/providers/test/iap-assertion.spec.ts …
+  Test Files  2 passed (2)
+       Tests  42 passed (42)
+```
+
+Full owned scope, which is what the new build stage runs: **9 files, 159 tests, green.**
+
+**A note on the test stage.** `node:22-alpine`, not `-slim`: the lockfile resolves the
+rolldown binding to `linux-x64-musl`, and on glibc vitest dies with "Cannot find native
+binding" before running a test — which reads like a broken install rather than the wrong
+libc. And it runs only the specs this fork owns, because `--ignore-scripts` leaves
+better-sqlite3 without its native binding and nine of upstream's auth suites then fail to
+load while every test that runs passes.
+
+---
+
 ## 2026-08-29 — why the members saw an empty portal
 
 **What.** No code change. A diagnosis, written down in

@@ -32,6 +32,7 @@ therefore not optional.
 - `packages/auth/providers/iap/verify-assertion.ts` — new. The security core: signature, issuer, audience, expiry, hosted domain, and the signed/unsigned cross-check.
 - `packages/auth/providers/iap/resolve-groups.ts` — new. Email to Homarr groups. The one rule: nothing the browser can influence decides admin-ness.
 - `packages/auth/providers/iap/iap-provider.ts` — new. The `authorize()` callback and first-sign-in user creation.
+- `packages/auth/providers/iap/service-accounts.ts` — new. The machine identities allowed to administer the portal, so the agent can drive Homarr's own API instead of its database. The only path that walks past the domain check; narrowed to exact `*.gserviceaccount.com` matches and empty by default.
 - `packages/auth/providers/test/iap-assertion.spec.ts` — new. Signs real ES256 tokens with a key the test controls and attacks the verifier with them.
 - `apps/nextjs/src/app/api/auth/[...nextauth]/route.ts` — an `iap` branch in `extractProvider`, parallel to the existing three.
 - `apps/nextjs/src/app/[locale]/auth/login/page.tsx` — one more prop passed to the form.

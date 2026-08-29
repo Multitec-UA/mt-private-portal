@@ -18,6 +18,39 @@
 # image will otherwise rediscover the parse error from scratch.
 
 steps:
+  # --- Our tests, before the image, so a failure costs one minute and not fifteen. ---
+  #
+  # Only what this fork owns. Running Homarr's whole suite here would be testing upstream's
+  # code on every build of ours, and upstream already does that.
+  #
+  # It is also not merely wasteful — it does not work. `--ignore-scripts` means
+  # better-sqlite3 never compiles its native binding, so nine of upstream's auth suites
+  # fail to LOAD (0 tests each) while every test that runs passes. Dropping the flag would
+  # mean installing a C toolchain into this step to build a driver our tests never touch.
+  # Measured 2026-08-29: this scope is 9 files, 159 tests, green.
+  #
+  # node:22-ALPINE and not -slim, which is not cosmetic: `pnpm-lock.yaml` resolves the
+  # rolldown native binding to `@rolldown/binding-linux-x64-musl`. On a glibc image vitest
+  # dies with "Cannot find native binding" before running a single test — which reads like
+  # a broken install rather than the wrong libc.
+  - name: node:22-alpine
+    entrypoint: sh
+    args:
+      - -c
+      - |
+        set -eu
+        corepack enable
+        pnpm install --frozen-lockfile --ignore-scripts
+        # --frozen-lockfile because MULTITEC.md forbids moving pnpm-lock.yaml except for a
+        # real dependency change, and a build must never be the thing that moves it.
+        node node_modules/vitest/vitest.mjs run \
+          packages/auth/providers/test/iap-assertion.spec.ts \
+          packages/auth/providers/test/filter-providers.spec.ts \
+          packages/definitions
+    env:
+      - CI=true
+      - NODE_ENV=development
+
   - name: gcr.io/cloud-builders/docker
     entrypoint: bash
     env:

@@ -3,6 +3,7 @@ import { createRemoteJWKSet, jwtVerify } from "jose";
 import { createLogger } from "@homarr/core/infrastructure/logs";
 
 import { env } from "../../env";
+import { isMachineAdministrator } from "./service-accounts";
 
 const logger = createLogger({ module: "iapAssertion" });
 
@@ -109,11 +110,30 @@ export const verifyIapAssertionAsync = async (
    * whose `hd` says one Workspace while its address says ours. `hd` is the canonical
    * signal for which Workspace an account belongs to, so when Google states it, it wins.
    *
-   * A service account outside the domain therefore cannot obtain a portal account — which
-   * is correct: nothing automated needs one. `/api/health/live` needs no session at all.
+   * The one exception is an explicitly listed machine identity — see
+   * `service-accounts.ts` for why that is narrow rather than a hole. It used to say here
+   * that no service account could ever get in because "nothing automated needs one"; that
+   * stopped being true on 2026-08-29, when Sergio asked for the agent to administer the
+   * portal without him touching the UI. The requirement changed, not the reasoning.
    */
   const expectedDomain = env.AUTH_IAP_HOSTED_DOMAIN;
-  if (expectedDomain) {
+  if (isMachineAdministrator(email)) {
+    /**
+     * A Google service account's assertion carries no `hd` — measured in the phase-0 spike
+     * and true by construction, since `hd` is a Workspace-*user* claim. So an assertion
+     * that presents both a listed machine address AND a hosted domain is not the shape
+     * anything legitimate produces, and refusing it costs nothing.
+     */
+    if (hostedDomain !== null) {
+      logger.error("Rejected an IAP sign-in", {
+        reason: "MACHINE_IDENTITY_WITH_HOSTED_DOMAIN",
+        email,
+        hostedDomainClaim: hostedDomain,
+      });
+      return null;
+    }
+    logger.info("Accepting a configured machine administrator", { email });
+  } else if (expectedDomain) {
     const effectiveDomain = hostedDomain ?? email.split("@")[1] ?? "";
     if (effectiveDomain !== expectedDomain) {
       logger.warn("Rejected an IAP sign-in", {

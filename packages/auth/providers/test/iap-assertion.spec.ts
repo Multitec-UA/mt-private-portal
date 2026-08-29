@@ -32,6 +32,7 @@ const mockEnv = vi.hoisted(() => ({
   AUTH_IAP_ADMIN_CACHE_SECONDS: 0,
   AUTH_IAP_ADMIN_GROUP: "admins",
   AUTH_IAP_MEMBER_GROUP: undefined as string | undefined,
+  AUTH_IAP_SERVICE_ACCOUNTS: "",
 }));
 
 vi.mock("../../env", () => ({ env: mockEnv }));
@@ -98,7 +99,13 @@ const sign = async (options: TokenOptions = {}) => {
 beforeEach(() => {
   mockEnv.AUTH_IAP_HOSTED_DOMAIN = "multitecua.com";
   mockEnv.AUTH_IAP_MEMBER_GROUP = undefined;
+  mockEnv.AUTH_IAP_SERVICE_ACCOUNTS = "";
 });
+
+const AGENT = "quantumpc-agent@sergio-conejero.iam.gserviceaccount.com";
+
+/** A service-account assertion: a real address and, as Google mints it, no `hd` at all. */
+const signAsMachine = (email = AGENT) => sign({ email, hd: null, subject: "accounts.google.com:117" });
 
 describe("verifyIapAssertionAsync", () => {
   test("accepts an assertion signed by IAP's key with the right issuer and audience", async () => {
@@ -275,5 +282,96 @@ describe("resolveGroupsForEmailAsync", () => {
     writeAdmins({ members: ["boss@multitecua.com"] });
     expect(await resolveGroupsForEmailAsync("boss@multitecua.com")).toEqual(["admins"]);
     mockEnv.AUTH_IAP_ADMIN_CACHE_SECONDS = 0;
+  });
+});
+
+/**
+ * The machine administrator: the agent holding a real session so it can drive Homarr's own
+ * API instead of writing to the database. Sergio asked for that on 2026-08-29 and the whole
+ * risk of it is concentrated here, because it is the one path that walks past the domain
+ * check. These tests are the fence.
+ */
+describe("machine administrators", () => {
+  test("the default is OFF — an unlisted service account is still refused", async () => {
+    // The regression that matters most: deployments that never set the variable must behave
+    // exactly as they did before this feature existed.
+    expect(await verifyIapAssertionAsync(await signAsMachine())).toBeNull();
+  });
+
+  test("a listed service account is accepted despite having no hd", async () => {
+    mockEnv.AUTH_IAP_SERVICE_ACCOUNTS = AGENT;
+    expect(await verifyIapAssertionAsync(await signAsMachine())).toEqual({
+      subject: "accounts.google.com:117",
+      email: AGENT,
+      hostedDomain: null,
+    });
+  });
+
+  test("and it is an admin without the export existing at all", async () => {
+    // The point of the design: the agent must still be able to fix the portal when the
+    // admin export is missing, which is one of the things it would be fixing.
+    mockEnv.AUTH_IAP_SERVICE_ACCOUNTS = AGENT;
+    rmSync(adminFile, { force: true });
+    resetAdminCacheForTests();
+    expect(await resolveGroupsForEmailAsync(AGENT)).toEqual(["admins"]);
+  });
+
+  test("a DIFFERENT service account is refused while one is listed", async () => {
+    // Exact match, not "any service account", and not a suffix test.
+    mockEnv.AUTH_IAP_SERVICE_ACCOUNTS = AGENT;
+    const other = await signAsMachine("someone-else@evil-project.iam.gserviceaccount.com");
+    expect(await verifyIapAssertionAsync(other)).toBeNull();
+  });
+
+  test("a human address in the list is DROPPED, not honoured", async () => {
+    // This is the attack the allowlist could otherwise enable: naming an ordinary address
+    // here would walk it straight past AUTH_IAP_HOSTED_DOMAIN. Only *.gserviceaccount.com
+    // is ever admitted, so the mistake fails safe instead of opening the domain.
+    mockEnv.AUTH_IAP_SERVICE_ACCOUNTS = "outsider@gmail.com";
+    const outsider = await sign({ email: "outsider@gmail.com", hd: null });
+    expect(await verifyIapAssertionAsync(outsider)).toBeNull();
+    expect(await resolveGroupsForEmailAsync("outsider@gmail.com")).toEqual([]);
+  });
+
+  test("a listed account presenting an hd is refused as impersonation", async () => {
+    // A Google service account never carries `hd`; `hd` is a Workspace-user claim. Both at
+    // once is not a shape anything legitimate produces.
+    mockEnv.AUTH_IAP_SERVICE_ACCOUNTS = AGENT;
+    const odd = await sign({ email: AGENT, hd: "multitecua.com" });
+    expect(await verifyIapAssertionAsync(odd)).toBeNull();
+  });
+
+  test("a listed account still has to be signed by Google", async () => {
+    // Being on the list changes the domain check and nothing else. Signature, issuer,
+    // audience and expiry all still apply.
+    mockEnv.AUTH_IAP_SERVICE_ACCOUNTS = AGENT;
+    expect(await verifyIapAssertionAsync(await sign({ key: attacker.privateKey, email: AGENT, hd: null }))).toBeNull();
+    expect(
+      await verifyIapAssertionAsync(await sign({ email: AGENT, hd: null, audience: "/projects/1234/x" })),
+    ).toBeNull();
+    expect(await verifyIapAssertionAsync(await sign({ email: AGENT, hd: null, expiresIn: -120 }))).toBeNull();
+  });
+
+  test("the list tolerates spaces, case and several entries", async () => {
+    mockEnv.AUTH_IAP_SERVICE_ACCOUNTS = ` One@a.iam.gserviceaccount.com , ${AGENT.toUpperCase()} `;
+    expect(await verifyIapAssertionAsync(await signAsMachine())).not.toBeNull();
+    expect(await verifyIapAssertionAsync(await signAsMachine("one@a.iam.gserviceaccount.com"))).not.toBeNull();
+  });
+
+  test("a machine admin does NOT also collect the member group", async () => {
+    // It administers the portal; it is not a socio, and it should not appear in a group
+    // whose purpose is to describe the association's members.
+    mockEnv.AUTH_IAP_SERVICE_ACCOUNTS = AGENT;
+    mockEnv.AUTH_IAP_MEMBER_GROUP = "socios";
+    expect(await resolveGroupsForEmailAsync(AGENT)).toEqual(["admins"]);
+  });
+
+  test("humans are unaffected by the list existing", async () => {
+    mockEnv.AUTH_IAP_SERVICE_ACCOUNTS = AGENT;
+    writeAdmins({ members: ["boss@multitecua.com"] });
+    resetAdminCacheForTests();
+    expect(await verifyIapAssertionAsync(await sign())).not.toBeNull();
+    expect(await resolveGroupsForEmailAsync("boss@multitecua.com")).toEqual(["admins"]);
+    expect(await resolveGroupsForEmailAsync("member@multitecua.com")).toEqual([]);
   });
 });
