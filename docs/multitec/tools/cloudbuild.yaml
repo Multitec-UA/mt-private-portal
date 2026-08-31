@@ -97,13 +97,35 @@ steps:
         # audience — the app validates its environment at boot, and a build box has none
         # of it. CI=true is what upstream's own Dockerfile passes.
         #
+        # THE IMAGE TAG, and why this is three lines instead of one `-t "$_IMAGE"`:
+        # Cloud Build substitutes `$_XXX` tokens in ONE pass over this file's own text.
+        # `$_IMAGE` is required by every manual `gcloud builds submit` call this file has
+        # ever seen. The trigger (multitec-terrafrom, `app.service.portal.cloudbuild`)
+        # cannot know a commit's SHA at `terraform apply` time, so it cannot supply that
+        # same substitution — it supplies `_IMAGE_BASE` instead, and `$SHORT_SHA` (a
+        # built-in, populated only on a real repo-triggered build) is resolved by Cloud
+        # Build directly in THIS file, not smuggled inside another substitution's value —
+        # a first version set `_IMAGE` itself to `"...:$SHORT_SHA"` at the Terraform end,
+        # and that `$SHORT_SHA` never got a second look.
+        # Both are read into a shell variable before use because Cloud Build replaces an
+        # unset custom substitution with an empty string rather than erroring (ALLOW_LOOSE
+        # is forced on every triggered build), and this script's own `set -euo pipefail`
+        # turns a literal, unquoted `$SHORT_SHA` into "unbound variable" the moment it is
+        # not a real substitution — measured, not guessed, in a failed run of exactly this
+        # trigger.
+        IMAGE="$_IMAGE"
+        if [ -z "$IMAGE" ]; then
+          IMAGE="${_IMAGE_BASE}:${SHORT_SHA}"
+        fi
+        echo "$IMAGE" > /workspace/.image
+        #
         # --push rather than build-then-push: with the container driver the image lives in
         # the builder, not in the daemon's image store, so a later `docker push` would not
         # find it.
         docker buildx build --push \
           --build-arg SKIP_ENV_VALIDATION=true \
           --build-arg CI=true \
-          -t "$_IMAGE" .
+          -t "$IMAGE" .
 
   # --- Roll it out. ---
   #
@@ -114,15 +136,18 @@ steps:
   # copy-pasting this exact command. The trigger's own service account already carries
   # `roles/run.admin` (`gcp.cloudbuild.tf`, granted for every service this project builds
   # this way, not added for this one) so this needs nothing new.
+  #
+  # Reads `/workspace/.image` rather than recomputing the fallback here: `/workspace` is
+  # the one thing every step in a build shares, and the previous step already resolved
+  # which of `$_IMAGE` / `${_IMAGE_BASE}:${SHORT_SHA}` actually applied.
   - name: gcr.io/cloud-builders/gcloud
+    entrypoint: bash
     args:
-      - run
-      - deploy
-      - mt-portal
-      - --image=$_IMAGE
-      - --project=multitecweb
-      - --region=europe-west1
-      - --quiet
+      - -c
+      - |
+        gcloud run deploy mt-portal \
+          --image="$(cat /workspace/.image)" \
+          --project=multitecweb --region=europe-west1 --quiet
 
 # The build is a pnpm install plus a Next.js monorepo build. It was tried on quantumpc
 # first and pushed that machine to 1.6 GB free with 5.6 GB of swap in use, next to a live
