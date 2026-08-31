@@ -8,8 +8,16 @@
 #   Error response from daemon: dockerfile parse error line 15: Unknown flag: parents
 #
 # It lives under docs/multitec/ rather than at the repository root because a root
-# `cloudbuild.yaml` would be a file inside upstream's tree, and this is ours. Pass it
-# explicitly:
+# `cloudbuild.yaml` would be a file inside upstream's tree, and this is ours.
+#
+# RUNS ON ITS OWN since 2026-08-31: a Cloud Build trigger (`mt-portal`, in
+# multitec-terrafrom's settings/multitecweb.yaml, `app.service.portal.cloudbuild`) fires
+# this file on every push to the `multitec` branch — `_IMAGE` comes from the trigger's own
+# substitutions, tagged `$SHORT_SHA`, and the last step deploys it. Before the trigger
+# existed this was three manual `gcloud builds submit` + `gcloud run deploy` round trips
+# in one session, each read off this file's own comment. Nobody should need to run this
+# by hand again; if you find yourself about to, that usually means the push didn't land on
+# `multitec`, not that the trigger is missing:
 #
 #   gcloud builds submit --config docs/multitec/tools/cloudbuild.yaml \
 #     --substitutions _IMAGE=<tag> --project multitecweb --region europe-west1
@@ -96,6 +104,25 @@ steps:
           --build-arg SKIP_ENV_VALIDATION=true \
           --build-arg CI=true \
           -t "$_IMAGE" .
+
+  # --- Roll it out. ---
+  #
+  # `template[0].containers[0].image` is unconditionally in this project's shared Cloud
+  # Run module's `ignore_changes` — Terraform deliberately never touches it, so nothing
+  # updates the running revision unless something calls `gcloud run deploy` itself. Before
+  # a trigger existed, that "something" was a person, three times in one afternoon,
+  # copy-pasting this exact command. The trigger's own service account already carries
+  # `roles/run.admin` (`gcp.cloudbuild.tf`, granted for every service this project builds
+  # this way, not added for this one) so this needs nothing new.
+  - name: gcr.io/cloud-builders/gcloud
+    args:
+      - run
+      - deploy
+      - mt-portal
+      - --image=$_IMAGE
+      - --project=multitecweb
+      - --region=europe-west1
+      - --quiet
 
 # The build is a pnpm install plus a Next.js monorepo build. It was tried on quantumpc
 # first and pushed that machine to 1.6 GB free with 5.6 GB of swap in use, next to a live
