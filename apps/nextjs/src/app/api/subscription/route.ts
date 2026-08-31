@@ -39,6 +39,9 @@ export async function GET() {
     { headers: auth_header },
   );
   if (!customerSearch.ok) {
+    // Logged rather than swallowed: a 401 here (bad key) looks identical to "no
+    // subscription" from the outside, and that difference is worth being able to see.
+    console.error("subscription: Stripe customer lookup failed", customerSearch.status, await customerSearch.text());
     return genericLoginRedirect(email);
   }
   const customers = (await customerSearch.json()) as { data: { id: string }[] };
@@ -55,6 +58,7 @@ export async function GET() {
     body: new URLSearchParams({ customer: customerId, return_url: RETURN_URL }),
   });
   if (!portalSession.ok) {
+    console.error("subscription: Stripe portal session failed", portalSession.status, await portalSession.text());
     return genericLoginRedirect(email);
   }
   const { url } = (await portalSession.json()) as { url: string };
