@@ -113,11 +113,18 @@ steps:
         # turns a literal, unquoted `$SHORT_SHA` into "unbound variable" the moment it is
         # not a real substitution — measured, not guessed, in a failed run of exactly this
         # trigger.
-        IMAGE="$_IMAGE"
-        if [ -z "$IMAGE" ]; then
-          IMAGE="${_IMAGE_BASE}:${SHORT_SHA}"
+        #
+        # lowercase on purpose: Cloud Build's substitution scanner reads every dollar
+        # sign followed by an all-caps word ANYWHERE in this file — including inside a
+        # step's own script, comments and all — as an attempted substitution. Naming
+        # this variable in all caps (the natural bash convention) failed config
+        # validation outright, before a single step ran: "key in the template is not a
+        # valid built-in substitution". Lowercase is invisible to that scanner.
+        image_tag="$_IMAGE"
+        if [ -z "$image_tag" ]; then
+          image_tag="${_IMAGE_BASE}:${SHORT_SHA}"
         fi
-        echo "$IMAGE" > /workspace/.image
+        echo "$image_tag" > /workspace/.image
         #
         # --push rather than build-then-push: with the container driver the image lives in
         # the builder, not in the daemon's image store, so a later `docker push` would not
@@ -125,7 +132,7 @@ steps:
         docker buildx build --push \
           --build-arg SKIP_ENV_VALIDATION=true \
           --build-arg CI=true \
-          -t "$IMAGE" .
+          -t "$image_tag" .
 
   # --- Roll it out. ---
   #
