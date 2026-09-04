@@ -40,11 +40,27 @@ therefore not optional.
 - `packages/auth/package.json` — `jose` declared as a dependency.
 - `pnpm-workspace.yaml` — the matching `jose: ^6.2.3` catalog entry.
 - `pnpm-lock.yaml` — the by-product of the two above. Never hand-edited: on a sync, take upstream's and re-run `pnpm install`.
+- `apps/nextjs/src/app/api/subscription/route.ts` — new. The Stripe billing-portal redirect: look the signed-in member up as a Customer, mint them a billing portal session. Was unregistered until 2026-09-04, and the guard was right to fail on it.
+- `packages/api/src/multitec/identity.ts` — new. Signs the signed-in member's email so our own feed endpoints can trust it, and refuses to send it anywhere but loopback. Off unless `AUTH_IAP_AUDIENCE` is set.
+- `packages/api/src/multitec/identity.spec.ts` — new. Attacks the verifier with forged, moved, tampered, stale and wrong-length signatures, and pins that a configuration mistake cannot send a member's email to a third party.
+- `packages/api/package.json` — one entry appended to the `exports` map, `./multitec/identity`, so `apps/nextjs` can import the verifier. The end of a literal map: the cheapest shape there is.
+- `packages/api/src/router/widgets/custom-api.ts` — a three-line `for` loop after the existing `applyAuth` call, adding the identity headers. **This is the unlock for every personalised tile**: without it `getData` sends `Accept: application/json` and nothing else, so every member's browser triggers the same request and gets the same answer. Deliberately a loop over a returned array rather than a function that mutates `headers`, so the diff against upstream is as small and as obviously side-effect-free as it can be.
+- `apps/nextjs/src/app/api/multitec/_lib/feed-names.ts` — new. The rules about feed names, kept free of database imports so they can be unit-tested with nothing configured.
+- `apps/nextjs/src/app/api/multitec/_lib/feed-names.spec.ts` — new. Pins the reserved `member-` prefix, which is the one line that stops a shared feed from serving every member's row.
+- `apps/nextjs/src/app/api/multitec/_lib/feed-store.ts` — new. Reads one feed row that quantumpc published into the portal's own database.
+- `apps/nextjs/src/app/api/multitec/feed/[...path]/route.ts` — new. Serves a shared feed, or the caller's own row out of a `member-*` feed. `Cache-Control: private, no-store` on every answer.
 <!-- END REGISTRY -->
 
-**Fourteen entries, of which six are new files in a directory upstream does not have.** The
-eight that genuinely modify upstream code are each a handful of lines at a stable anchor —
-the end of a tuple, one more entry in an array, an extra `case`, one more prop.
+**Twenty-three entries.** Ten genuinely modify upstream code, and each is a handful of
+lines at a stable anchor — the end of a tuple, one more entry in an array or a map, an extra
+`case`, one more prop, a `for` loop after an existing call. The rest are new files, and a
+file we create at a path upstream does not have cannot conflict with anything.
+
+The 2026-09-04 additions are the portal's integrations (`docs/portal/integrations.md` in the
+agent repository): everything that could change often — which feeds exist, what they
+contain, how a tile renders — lives on quantumpc and in Homarr's own database, so adding a
+tile needs no change here and no rebuild. What is here is only "sign who is asking" and
+"read a row".
 
 `jose` is declared rather than inherited on purpose. It is already in the tree as a
 transitive dependency of `@auth/core`, and with pnpm's hoisted layout an undeclared import

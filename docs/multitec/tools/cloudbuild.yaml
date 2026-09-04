@@ -55,11 +55,22 @@ steps:
         set -eu
         corepack enable
         pnpm install --frozen-lockfile --ignore-scripts
+        # The fork-hygiene linter, before anything expensive. It needs the upstream ref,
+        # which a Cloud Build checkout does not have — so it is skipped rather than failed
+        # when there is none, and enforced on quantumpc where the remote exists. A guard
+        # that cannot run must never look like a guard that passed, hence the message.
+        if git rev-parse --verify --quiet upstream/dev >/dev/null 2>&1; then
+          bash docs/multitec/tools/upstream-guard.sh
+        else
+          echo "upstream-guard: SKIPPED — no upstream/dev in this checkout (run it locally)"
+        fi
         # --frozen-lockfile because MULTITEC.md forbids moving pnpm-lock.yaml except for a
         # real dependency change, and a build must never be the thing that moves it.
         node node_modules/vitest/vitest.mjs run \
           packages/auth/providers/test/iap-assertion.spec.ts \
           packages/auth/providers/test/filter-providers.spec.ts \
+          packages/api/src/multitec/identity.spec.ts \
+          apps/nextjs/src/app/api/multitec/_lib/feed-names.spec.ts \
           packages/definitions
     env:
       - CI=true

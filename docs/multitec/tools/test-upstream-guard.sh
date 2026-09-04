@@ -113,8 +113,17 @@ d=$(scratch)
 echo "our change" >>"$d/packages/auth/configuration.ts"
 register "$d" "packages/auth/configuration.ts"
 commit_all "$d"
-run_guard "$d"
+# MAX_TOUCHED passed explicitly, so this asserts the mechanism and not the current default.
+# It said "budget 12" literally until 2026-09-04 and broke the moment the default moved,
+# which is a test measuring the wrong thing: whether a registered edit passes has nothing
+# to do with what the ceiling happens to be.
+run_guard "$d" MAX_TOUCHED=12
 expect "registered modification passes" 0 "1 modified (budget 12)"
+
+# ... and the default itself gets its own check, so moving it is a deliberate edit here
+# rather than a silent one in the guard. The reasoning for 14 is in the guard's own comment.
+run_guard "$d"
+expect "the default modified-file budget is 14" 0 "budget 14"
 rm -rf "$d"
 
 # --- 5. generated files are refused even when registered --------------------------------

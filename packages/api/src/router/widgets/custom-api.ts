@@ -7,6 +7,7 @@ import { customWidgetDefinitions } from "@homarr/db/schema";
 import { eq } from "@homarr/db";
 import { createLogger } from "@homarr/core/infrastructure/logs";
 import { createTRPCRouter, protectedProcedure } from "../../trpc";
+import { signedIdentityHeaders } from "../../multitec/identity";
 import { applyAuth } from "../custom-widget/auth";
 import { extractActionButtonDisplay, extractDisplayDataWithFallback } from "../custom-widget/display-data";
 
@@ -55,6 +56,14 @@ export const customApiRouter = createTRPCRouter({
     }
 
     applyAuth(headers, url, definition.authType, decryptedSecrets, definition.headerName);
+
+    // MULTITEC: tell our own feed endpoints who is looking, so a tile can show the member
+    // their own membership, cuota and seat instead of the same numbers for everybody.
+    // Returns nothing at all unless this is the Multitec portal AND the url is loopback —
+    // see packages/api/src/multitec/identity.ts.
+    for (const [name, value] of signedIdentityHeaders(url, ctx.session.user.email)) {
+      headers.set(name, value);
+    }
 
     const controller = new AbortController();
     const timeout = setTimeout(() => controller.abort(), FETCH_TIMEOUT_MS);

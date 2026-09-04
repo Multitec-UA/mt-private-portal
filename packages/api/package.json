@@ -18,7 +18,8 @@
     "./shared": "./src/shared.ts",
     "./open-api": "./src/open-api.ts",
     "./custom-widget/display-data": "./src/router/custom-widget/display-data.ts",
-    "./mcp": "./src/mcp.ts"
+    "./mcp": "./src/mcp.ts",
+    "./multitec/identity": "./src/multitec/identity.ts"
   },
   "scripts": {
     "clean": "rm -rf .turbo node_modules",

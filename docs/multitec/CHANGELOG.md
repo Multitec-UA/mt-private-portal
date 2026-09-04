@@ -11,6 +11,90 @@ was verified afterwards.
 
 ---
 
+## 2026-09-04 — the tiles can carry information, and one of them can know who is looking
+
+**What.** Three things, and deliberately no more:
+
+1. `GET /api/multitec/feed/<name>` serves a JSON feed that quantumpc published into a table
+   of our own, `multitec_feeds`. `GET /api/multitec/feed/me/<name>` serves the caller's own
+   row out of the feed `member-<name>`, keyed by email.
+2. `packages/api/src/multitec/identity.ts` signs the signed-in member's address with a key
+   derived from `SECRET_ENCRYPTION_KEY`, and `custom-api.ts` attaches it — to loopback URLs
+   only, and only when `AUTH_IAP_AUDIENCE` is set.
+3. `docs/multitec/tools/cloudbuild.yaml` now runs the fork-hygiene guard and the two new
+   specs before it builds anything.
+
+**Why.** Sergio, 2026-09-04, on the proposal in the agent repository's
+`docs/portal/integrations.md`: *"me han gustado mucho. Quiero que lo lleves al máximo
+nivel."* Both boards were 145 `app` widgets — a picture and an `href`. Homarr's own
+`customApi` widget can already render Mantine cards, tables and charts from any JSON URL,
+so shared information needed nothing from this fork at all.
+
+Personal information needed exactly one thing. `getData` is a `protectedProcedure`, so
+`ctx.session.user` is right there with the member's verified corporate email, and the
+outbound request was built as `new Headers({ Accept: "application/json" })` — nothing about
+the member went out, so every member's browser got the same answer. That is the whole gap,
+and it is three lines wide.
+
+**Why it is signed rather than a plain header.** The feed endpoint is in this application,
+behind the same IAP, so a member can reach it from their own browser. A bare
+`X-Multitec-Member` header would let any member ask for another member's row by typing a
+different address. The HMAC closes that; the key is derived with a domain label from a
+secret that already exists, so there is no second secret to rotate and no Terraform change
+— which mattered, because a full plan of the `multitecweb` workspace that day came back
+`1 to add, 1 to change, 56 to destroy` and is not safe to apply.
+
+**Why the identity only goes to loopback, hard-coded.** `customApi` definitions are edited
+through a web form. A configurable allow-list would be a way to send a member's email to
+GitHub or Stripe through a configuration mistake, and nothing outside this container needs
+it. `signedIdentityHeaders` returns an empty array for any other host.
+
+**Why so little of this lives here.** Everything that changes often — which feeds exist,
+what they contain, what a tile looks like — is on quantumpc (`bin/qpc-portal-feed`) or in
+Homarr's own database (the `customApi` definition). Adding a personalised tile is a
+collector and a definition, with no change to this fork and no twenty-minute build. What is
+here is only "sign who is asking" and "read a row".
+
+**Evidence.**
+
+```
+$ docs/multitec/tools/upstream-guard.sh
+upstream-guard: OK — 13 modified (budget 14), 13 added inside upstream's tree (budget 24), all registered
+
+$ docs/multitec/tools/test-upstream-guard.sh
+upstream-guard tests: 23 PASS, 0 FAIL
+
+$ vitest run packages/api/src/multitec/identity.spec.ts \
+    apps/nextjs/src/app/api/multitec/_lib/feed-names.spec.ts \
+    packages/auth/providers/test/iap-assertion.spec.ts \
+    packages/auth/providers/test/filter-providers.spec.ts
+Test Files  4 passed (4)
+     Tests  65 passed (65)
+
+$ tsc --noEmit          # packages/api and apps/nextjs
+(no output)
+
+$ oxlint src/multitec src/router/widgets/custom-api.ts   # and src/app/api/multitec
+Found 1 warning and 0 errors.       # the warning is upstream's superjson import
+```
+
+Two of those tests earned their place by failing first:
+
+- **`" 1767225600"` verified successfully** when it was expected to be refused. Not a hole
+  in the verifier — `Headers` implements Fetch's "normalize a header value" and strips
+  surrounding whitespace before any of our code runs. The test now records that, because
+  "the vector cannot reach the check" is a different fact from "the check rejects it".
+- **The modified-file budget was already 11 of 12** before this feature was written; the
+  IAP provider's own estimate had said 9 and did not count `pnpm-lock.yaml`. Raised to 14
+  with the arithmetic in the guard's own comment, and the guard's self-test now pins the
+  default so moving it again has to be deliberate.
+
+**The budget.** 13 modified upstream files of 14, 13 added of 24. The two new modifications
+are one line appended to the `exports` map in `packages/api/package.json` and a three-line
+`for` loop after the existing `applyAuth` call.
+
+---
+
 ## 2026-08-29 — the agent administers the portal through its own API
 
 **What.** `AUTH_IAP_SERVICE_ACCOUNTS`: an explicit, empty-by-default list of Google service
