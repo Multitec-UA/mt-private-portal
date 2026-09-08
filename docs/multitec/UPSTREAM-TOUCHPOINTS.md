@@ -47,7 +47,8 @@ therefore not optional.
 - `packages/api/src/router/widgets/custom-api.ts` — a three-line `for` loop after the existing `applyAuth` call, adding the identity headers. **This is the unlock for every personalised tile**: without it `getData` sends `Accept: application/json` and nothing else, so every member's browser triggers the same request and gets the same answer. Deliberately a loop over a returned array rather than a function that mutates `headers`, so the diff against upstream is as small and as obviously side-effect-free as it can be.
 - `apps/nextjs/src/app/api/multitec/_lib/feed-names.ts` — new. The rules about feed names, kept free of database imports so they can be unit-tested with nothing configured.
 - `apps/nextjs/src/app/api/multitec/_lib/feed-names.spec.ts` — new. Pins the reserved `member-` prefix, which is the one line that stops a shared feed from serving every member's row.
-- `apps/nextjs/src/app/api/multitec/_lib/feed-store.ts` — new. Reads one feed row that quantumpc published into the portal's own database.
+- `apps/nextjs/src/app/api/multitec/_lib/feed-store.ts` — new. Reads one feed that quantumpc published: from JSON bundles on the read-only GCS volume when `MULTITEC_FEED_DIR` is set, from the database row otherwise (agent-repo ADR 0063 — the database write cost ~6 minutes of Neon compute per one-second write).
+- `apps/nextjs/src/app/api/multitec/_lib/feed-store.spec.ts` — new. Covers the bundle path only, with a stubbed `@homarr/db` that throws: the assertion is that reading a bundle never touches a database. Includes the test that reaches the in-bundle name filter directly, because going through `readFeed` cannot distinguish that filter from its absence.
 - `apps/nextjs/src/app/api/multitec/feed/[...path]/route.ts` — new. Serves a shared feed, or the caller's own row out of a `member-*` feed. `Cache-Control: private, no-store` on every answer.
 <!-- END REGISTRY -->
 

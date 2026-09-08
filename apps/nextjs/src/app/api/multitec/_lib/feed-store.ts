@@ -15,16 +15,28 @@
  * lands in a web-facing container, and a publisher that stops running shows a stale
  * timestamp rather than taking a tile down.
  *
- * WHY THIS DATABASE AND NOT A BUCKET
- * ----------------------------------
- * A GCS bucket was the first design and is arguably the more natural home for a blob. It
- * needs one new bucket, two IAM bindings and one env var — all of which are Terraform, and
- * on 2026-09-04 a full plan of the `multitecweb` workspace came back
- * `1 to add, 1 to change, 56 to destroy`: the repository's YAML no longer describes what
- * exists, and an apply there would take out the Claude seats system. Until that is fixed,
- * anything needing Terraform is blocked, and this needs none: quantumpc already holds this
- * database's credential (it takes the nightly backup) and this service already has a pool
- * open to it.
+ * IT IS A BUCKET NOW, AND THE DATABASE COST REAL MONEY
+ * ----------------------------------------------------
+ * A GCS bucket was the first design. It was passed over on 2026-09-04 because it needed
+ * Terraform and a full plan of the `multitecweb` workspace came back
+ * `1 to add, 1 to change, 56 to destroy` — so anything needing Terraform was blocked. That
+ * plan turned out to be a checkout seven commits behind an uncommitted file, and it was
+ * corrected; the blocker never really existed.
+ *
+ * The database, meanwhile, did cost. Neon's free plan suspends an idle compute after five
+ * minutes and the timeout cannot be disabled, so the publisher's one-second write billed
+ * about SIX MINUTES of compute. Six of those an hour held the members' database awake 84 %
+ * of the time and burnt 23.5 of the project's 100 monthly CU-hours in the first seven days
+ * of September — measured from Neon's own wake/suspend log. Left alone, the quota ran out
+ * around 23 September and Neon switches the compute off until the 1st.
+ *
+ * So when `MULTITEC_FEED_DIR` is set, feeds are read from JSON bundles on a read-only GCS
+ * volume — the same mechanism this service already uses for the admin list — and the
+ * publisher never opens a database connection at all. Reading an object costs no
+ * compute-hours anywhere. Agent-repo ADR 0063 has the numbers.
+ *
+ * With the variable unset the database path below is used unchanged, which is what keeps
+ * MULTITEC.md rule 5 true and makes the whole move revertible by removing one env var.
  *
  * THE TABLE IS OURS AND HOMARR DOES NOT KNOW IT EXISTS
  * ----------------------------------------------------
@@ -34,6 +46,9 @@
  * dialect-specific types, so the same statement works on all three databases Homarr
  * supports.
  */
+
+import { readdir, readFile } from "node:fs/promises";
+import { join } from "node:path";
 
 import { db, sql } from "@homarr/db";
 
@@ -91,8 +106,80 @@ interface ExecutingDb {
 const rowsOf = (result: { rows?: Record<string, unknown>[] } | Record<string, unknown>[]) =>
   Array.isArray(result) ? result : (result.rows ?? []);
 
+/**
+ * The directory the feed bundles are mounted at, or undefined for the database path.
+ *
+ * Read through a function and not a module constant: a module constant is captured at
+ * import time, which in a Next.js build means at BUILD time, and the value only exists in
+ * the deployed revision.
+ */
+const feedDir = (): string | undefined => process.env.MULTITEC_FEED_DIR;
+
+/**
+ * One bundle object as the publisher writes it (`bin/qpc-portal-feed`, `bundle_document`).
+ * There is a self-test on that side asserting this exact shape, because it is the contract
+ * between two repositories and nothing else checks it.
+ */
+interface BundleDocument {
+  bundle?: string;
+  updatedAt?: string;
+  feeds?: Record<string, { payload?: unknown; updatedAt?: string }>;
+}
+
+/**
+ * All feeds from all bundles, cached as ONE entry.
+ *
+ * The database version cached per feed name because each name was a query. A bundle read
+ * hands back every feed in it at once, so caching per name would re-read the same file up
+ * to fourteen times a minute for no reason.
+ */
+let bundles: { feeds: Map<string, Feed>; fetchedAt: number } | null = null;
+
+const readBundles = async (dir: string, now: number): Promise<Map<string, Feed>> => {
+  if (bundles && now - bundles.fetchedAt < FEED_TTL_MS) return bundles.feeds;
+
+  const feeds = new Map<string, Feed>();
+  let names: string[] = [];
+  try {
+    names = (await readdir(dir)).filter((entry) => entry.endsWith(".json"));
+  } catch {
+    // The mount is not there. Cached like any other answer so a missing volume cannot turn
+    // every board render into a filesystem call, and re-tried a minute later.
+    bundles = { feeds, fetchedAt: now };
+    return feeds;
+  }
+
+  for (const file of names.sort()) {
+    let document: BundleDocument;
+    try {
+      document = JSON.parse(await readFile(join(dir, file), "utf8")) as BundleDocument;
+    } catch {
+      // A bundle mid-write or hand-edited into invalid JSON. Skipped, not fatal: one broken
+      // bundle must not take the other one's tiles down with it, and a tile showing nothing
+      // is better than a 500 on the board.
+      continue;
+    }
+    for (const [name, entry] of Object.entries(document.feeds ?? {})) {
+      // Checked here as well as on the way in. The name becomes part of a URL path and of a
+      // cache key, and this is a file the portal does not write.
+      if (!isValidFeedName(name)) continue;
+      feeds.set(name, {
+        name,
+        payload: entry?.payload ?? null,
+        updatedAt: String(entry?.updatedAt ?? document.updatedAt ?? ""),
+      });
+    }
+  }
+
+  bundles = { feeds, fetchedAt: now };
+  return feeds;
+};
+
 export const readFeed = async (name: string, now: number = Date.now()): Promise<Feed | null> => {
   if (!isValidFeedName(name)) return null;
+
+  const dir = feedDir();
+  if (dir) return (await readBundles(dir, now)).get(name) ?? null;
 
   const cached = cache.get(name);
   if (cached && now - cached.fetchedAt < FEED_TTL_MS) return cached.feed;
@@ -125,5 +212,22 @@ export const readFeed = async (name: string, now: number = Date.now()): Promise<
   return feed;
 };
 
-/** Only for tests: the cache is process-wide by design. */
-export const __resetFeedCache = () => cache.clear();
+/**
+ * Only for tests: the map `readBundles` builds, so the in-bundle name filter can be
+ * observed at all.
+ *
+ * It exists because the filter is otherwise UNREACHABLE. `readFeed` rejects an illegal name
+ * at its own front door, so a test that asks it for `../secrets` gets null whether or not
+ * the loop below filters anything — which is exactly what happened on the first attempt:
+ * deleting the filter left all nine tests green. Defence in depth that no test can
+ * distinguish from its absence is not defence, it is decoration, so the seam is exported
+ * rather than the check quietly trusted.
+ */
+export const __bundleFeedsForTest = async (dir: string, now: number = Date.now()) =>
+  Object.fromEntries(await readBundles(dir, now));
+
+/** Only for tests: the caches are process-wide by design. */
+export const __resetFeedCache = () => {
+  cache.clear();
+  bundles = null;
+};
