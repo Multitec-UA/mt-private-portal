@@ -40,6 +40,7 @@ trap cleanup EXIT
 docker network create "$tag" >/dev/null
 mkdir -p "$work/feeds/icons"
 printf 'RIFF\0\0\0\0WEBPfake' > "$work/feeds/icons/0123456789abcdef.webp"
+printf '\211PNGfake' > "$work/feeds/icons/0123456789abcdef.png"
 
 mounts=(-v "$here:/app/multitec:ro" -v "$work/feeds:/feeds:ro")
 nginx_only='envsubst "\${NGINX_LISTEN_IPV6}" < /etc/nginx/templates/nginx.conf > /etc/nginx/nginx.conf && exec nginx -g "daemon off;"'
@@ -104,6 +105,9 @@ path=/multitec-static/icons/0123456789abcdef.webp request "$pa" "$work/icon"
 check "A: an icon is served 200 while Next.js is still down" '[ "$(cat "$work/icon.code")" = 200 ]'
 check "A: ... as image/webp" 'grep -qi "^content-type: image/webp" "$work/icon.headers"'
 check "A: ... cached privately for a year, immutable" 'grep -qi "^cache-control: private, max-age=31536000, immutable" "$work/icon.headers"'
+path=/multitec-static/icons/0123456789abcdef.png request "$pa" "$work/png"
+check "A: a board's PNG logo is served as image/png (iOS takes no WebP home-screen icon)" \
+  '[ "$(cat "$work/png.code")" = 200 ] && grep -qi "^content-type: image/png" "$work/png.headers"'
 path=/multitec-static/icons/missing.webp request "$pa" "$work/noicon"
 check "A: a missing icon is a 404 that is NOT cached for a year" \
   '[ "$(cat "$work/noicon.code")" = 404 ] && ! grep -qi "max-age=31536000" "$work/noicon.headers"'
@@ -129,9 +133,15 @@ docker run -d --name "$tag-pg" --network "$tag" -e POSTGRES_PASSWORD=pw -e POSTG
 for _ in $(seq 1 60); do docker exec "$tag-pg" pg_isready -q >/dev/null 2>&1 && break; sleep 0.5; done
 sleep 1
 db="postgres://postgres:pw@$tag-pg:5432/portal"
-docker run --rm --network "$tag" -w /app --entrypoint node -e DB_DRIVER=node-postgres -e DB_DIALECT=postgresql \
-  -e DB_URL="$db" -e DISABLE_REDIS_LOGS=true "$image" ./db/migrations/postgresql/migrate.cjs ./db/migrations/postgresql >/dev/null 2>&1
-migrated=$?
+# Up to three tries: the postgres image restarts itself once after its init scripts, so a
+# first connection right after pg_isready can land in that gap (a flaky FAIL, seen once).
+for _ in 1 2 3; do
+  docker run --rm --network "$tag" -w /app --entrypoint node -e DB_DRIVER=node-postgres -e DB_DIALECT=postgresql \
+    -e DB_URL="$db" -e DISABLE_REDIS_LOGS=true "$image" ./db/migrations/postgresql/migrate.cjs ./db/migrations/postgresql >/dev/null 2>&1
+  migrated=$?
+  [ "$migrated" -eq 0 ] && break
+  sleep 2
+done
 check "C: migrations run on their own, outside the boot, as the build runs them" '[ "$migrated" -eq 0 ]'
 
 pc=$(free_port)

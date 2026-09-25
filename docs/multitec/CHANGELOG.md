@@ -11,6 +11,24 @@ was verified afterwards.
 
 ---
 
+## 2026-09-25 — board logos, favicons and backgrounds are served as files too
+
+**What.** `/multitec-static/icons/` serves `png` and `jpg` with their real types, beside
+`webp`.
+
+**Why.** After the app icons moved out, the members' page still carried 491 KB of `data:`
+URIs: the board's `logoImageUrl`, `faviconImageUrl` and a JPEG `backgroundImageUrl`,
+several copies of each per page. They are hosted in their original format, because iOS
+will not take a WebP as a home-screen icon. Upstream's `nginx.conf` includes no
+`mime.types`, so without the `types` block every file would have gone out as `webp`.
+
+**Evidence.** `test-boot-screen.sh`: OK, twice. The new check: `A: a board's PNG logo is
+served as image/png`. The migration check now retries for up to three attempts, because
+the Postgres image restarts once after its init scripts and a first connection had
+landed in that gap once.
+
+---
+
 ## 2026-09-25 — the boot screen's waiter starts before nginx
 
 **What.** `boot.sh` now waits until `ready-waiter.mjs` answers `/alive` before it hands
