@@ -11,6 +11,33 @@ was verified afterwards.
 
 ---
 
+## 2026-09-25 — the base reuse, verified in Cloud Build: 870 s to 74 s
+
+**Evidence.** Both builds ran on the same tree key, `7c859981764f14ce`.
+
+| Step | `5d239630` (`4be5911`, full) | `87c1e0f3` (`a3a8e84`, only `docs/multitec` touched) |
+|---|---:|---:|
+| Decide | 7 s | 8 s |
+| Tests | 102 s | 5 s (`SKIPPED`) |
+| buildx | 670 s | 1 s (`SKIPPED`) |
+| Warm | 29 s | 13 s (`REUSING warm-7c859981764f14ce`) |
+| Migrate | 3 s | 3 s |
+| Roll-out | 43 s | 37 s |
+| **Total** | **870 s** | **74 s** |
+
+- The first build logged `BUILDING the Homarr image …:base-7c859981764f14ce`. That is the
+  key computed offline beforehand, so the git tree in Cloud Build hashes the same.
+- The second build's candidate still answered `candidate healthy` through IAP before
+  traffic moved.
+- **Layers, from the registry manifests:**
+  - `a3a8e84` is the 23 layers of `base-7c859981764f14ce` unchanged, then the one
+    compile-cache layer of `warm-…`, then one new layer.
+  - That last layer holds `app/multitec/`, and its `boot.sh` has the new line.
+  - `4be5911` and `a3a8e84` share every layer but the last.
+- `mt-portal` serves `a3a8e84` at 100 %.
+
+---
+
 ## 2026-09-25 — a change to our own files no longer rebuilds Homarr
 
 **What.** `docs/multitec/tools/cloudbuild.yaml` gains a first step that works out what
