@@ -24,6 +24,10 @@
 # file runs only when the deployment points at it (multitec-terrafrom, `args` of the portal
 # service). MULTITEC.md rule 5: with none of our configuration, the fork is vanilla Homarr.
 #
+# A change to anything in this directory rebuilds only the image's last layer: the build
+# reuses the Homarr image of the same tree (`homarr:base-<key>`, first step of
+# docs/multitec/tools/cloudbuild.yaml), so it takes minutes, not a full Homarr build.
+#
 # Usage: boot.sh [command...]   (default: sh run.sh). The argument exists for the test,
 # which starts nginx alone to pin the boot-screen behaviour while nothing is behind it.
 set -eu

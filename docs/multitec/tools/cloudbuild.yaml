@@ -78,7 +78,7 @@ steps:
           echo "REUSING the Homarr image $(cat /workspace/.base): nothing outside docs/multitec/ changed"
         else
           echo no > /workspace/.base_reused
-          echo "BUILDING the Homarr image $(cat /workspace/.base): code outside docs/multitec/ changed"
+          echo "BUILDING the Homarr image $(cat /workspace/.base): no image of this tree yet"
         fi
         if exists "$(cat /workspace/.warm)"; then
           echo yes > /workspace/.warm_reused
