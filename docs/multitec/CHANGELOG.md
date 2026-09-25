@@ -11,6 +11,48 @@ was verified afterwards.
 
 ---
 
+## 2026-09-25 — a change to our own files no longer rebuilds Homarr
+
+**What.** `docs/multitec/tools/cloudbuild.yaml` gains a first step that works out what
+actually has to be built. It hashes the git tree with `docs/multitec/` left out, plus a
+recipe version, into a key.
+
+- If `homarr:base-<key>` already exists in the registry, the build skips the tests and
+  buildx.
+- If `homarr:warm-<key>` exists too, it also skips the compile-cache warm-up.
+- In both cases it rebuilds only the last layer, `COPY runtime /app/multitec`.
+
+A change to Homarr's code, to the Dockerfile or to the lockfile changes the key and gets
+the full build, exactly as before. The step fails towards building: with no git in the
+checkout, the key is unique and everything is built.
+
+**Why.** Sergio, 2026-09-25, after the boot-screen work cost three 13-minute builds: use
+the cached base image and build only what is new. Measured on build `e86bb3da`:
+
+| Step | Time |
+|---|---:|
+| Tests | 89 s |
+| buildx | 622 s |
+| Warm-up | 24 s |
+| Migrations | 3 s |
+| Roll-out | 49 s |
+
+Everything in `docs/multitec/runtime/` goes in a thin layer on top of the base, so a
+change there never needed those 622 s.
+
+**Evidence, offline.** The key step extracted from this file and run against the git
+tree:
+
+| Tree | Key |
+|---|---|
+| HEAD | `base-7c859981764f14ce` |
+| HEAD + a change to `docs/multitec/runtime/loading.html` | the same |
+| HEAD + a change to `apps/nextjs/next.config.ts` | `base-e319c8871d1e20d4` |
+
+The build evidence is in the next entry.
+
+---
+
 ## 2026-09-25 — board logos, favicons and backgrounds are served as files too
 
 **What.** `/multitec-static/icons/` serves `png` and `jpg` with their real types, beside

@@ -26,6 +26,67 @@
 # image will otherwise rediscover the parse error from scratch.
 
 steps:
+  # --- Decide what actually has to be built. ---
+  #
+  # Sergio, 2026-09-25, after an afternoon of 13-minute builds for changes that only touched
+  # our own files: use the cached base image and build only what is new. Measured on build
+  # e86bb3da: tests 89 s, the Homarr image (buildx) 622 s, compile-cache warm-up 24 s,
+  # migrations 3 s, candidate roll-out 49 s. Everything in docs/multitec/runtime/ goes into
+  # a thin layer ON TOP of the Homarr image, so a change there never needed those 622 s.
+  #
+  # THE KEY. The Homarr image is a function of every file in the repository except our
+  # docs/multitec/ tree, whose runtime part the thin layer adds on its own and whose tools
+  # (this file included) are not in the image at all. So the key is a hash of the git tree
+  # with docs/multitec/ left out, plus a recipe version for the build arguments below. An
+  # image tagged `base-<key>` in the registry IS that tree, built; if it is there, this
+  # build reuses it and skips the tests too (they test that very code, unchanged). The
+  # compile-cache image `warm-<key>` depends only on the base, so it is reused the same way.
+  #
+  # FAILS TOWARDS BUILDING. No git in the checkout (a manual `gcloud builds submit` does not
+  # upload .git), or a registry that cannot be asked, means an empty key and a full build.
+  # A cleanup policy that deleted an old base only costs one full build.
+  - name: gcr.io/cloud-builders/gcloud
+    entrypoint: bash
+    args:
+      - -c
+      - |
+        set -euo pipefail
+        # THE IMAGE TAG, and why it is resolved in a script: see the note on the build step.
+        image_tag="$_IMAGE"
+        if [ -z "$image_tag" ]; then
+          image_tag="${_IMAGE_BASE}:${SHORT_SHA}"
+        fi
+        echo "$image_tag" > /workspace/.image
+        repo="$${image_tag%:*}"
+
+        recipe="base-recipe-1"
+        key=""
+        if git rev-parse -q --verify HEAD >/dev/null 2>&1; then
+          key="$( { echo "$recipe"; git ls-tree -r HEAD | awk -F'\t' 'index($$2, "docs/multitec/") != 1'; } \
+            | sha256sum | cut -c1-16)"
+        fi
+        if [ -z "$key" ]; then
+          echo "no git tree in this checkout: building everything"
+          key="nogit-$(date +%s)"
+        fi
+        echo "$repo:base-$key" > /workspace/.base
+        echo "$repo:warm-$key" > /workspace/.warm
+
+        exists() { gcloud artifacts docker images describe "$$1" --quiet >/dev/null 2>&1; }
+        if exists "$(cat /workspace/.base)"; then
+          echo yes > /workspace/.base_reused
+          echo "REUSING the Homarr image $(cat /workspace/.base): nothing outside docs/multitec/ changed"
+        else
+          echo no > /workspace/.base_reused
+          echo "BUILDING the Homarr image $(cat /workspace/.base): code outside docs/multitec/ changed"
+        fi
+        if exists "$(cat /workspace/.warm)"; then
+          echo yes > /workspace/.warm_reused
+          echo "REUSING the compile-cache image $(cat /workspace/.warm)"
+        else
+          echo no > /workspace/.warm_reused
+        fi
+
   # --- Our tests, before the image, so a failure costs one minute and not fifteen. ---
   #
   # Only what this fork owns. Running Homarr's whole suite here would be testing upstream's
@@ -53,6 +114,11 @@ steps:
       - -c
       - |
         set -eu
+        # Same tree as an image already built and tested: nothing these tests cover changed.
+        if [ "$(cat /workspace/.base_reused)" = yes ]; then
+          echo "tests: SKIPPED, the code they cover is the code of $(cat /workspace/.base)"
+          exit 0
+        fi
         corepack enable
         pnpm install --frozen-lockfile --ignore-scripts
         # The fork-hygiene linter, before anything expensive. It needs the upstream ref,
@@ -84,6 +150,11 @@ steps:
       - -c
       - |
         set -euo pipefail
+        base="$(cat /workspace/.base)"
+        if [ "$(cat /workspace/.base_reused)" = yes ]; then
+          echo "buildx: SKIPPED, $base already exists"
+          exit 0
+        fi
 
         # `DOCKER_BUILDKIT=1` alone was not enough, and the second error is more
         # interesting than the first:
@@ -108,7 +179,7 @@ steps:
         # audience — the app validates its environment at boot, and a build box has none
         # of it. CI=true is what upstream's own Dockerfile passes.
         #
-        # THE IMAGE TAG, and why this is three lines instead of one `-t "$_IMAGE"`:
+        # THE IMAGE TAG (resolved in the first step now), and why it is not one `-t "$_IMAGE"`:
         # Cloud Build substitutes `$_XXX` tokens in ONE pass over this file's own text.
         # `$_IMAGE` is required by every manual `gcloud builds submit` call this file has
         # ever seen. The trigger (multitec-terrafrom, `app.service.portal.cloudbuild`)
@@ -131,11 +202,6 @@ steps:
         # this variable in all caps (the natural bash convention) failed config
         # validation outright, before a single step ran: "key in the template is not a
         # valid built-in substitution". Lowercase is invisible to that scanner.
-        image_tag="$_IMAGE"
-        if [ -z "$image_tag" ]; then
-          image_tag="${_IMAGE_BASE}:${SHORT_SHA}"
-        fi
-        echo "$image_tag" > /workspace/.image
         #
         # --push rather than build-then-push: with the container driver the image lives in
         # the builder, not in the daemon's image store, so a later `docker push` would not
@@ -143,7 +209,7 @@ steps:
         docker buildx build --push \
           --build-arg SKIP_ENV_VALIDATION=true \
           --build-arg CI=true \
-          -t "$image_tag-base" .
+          -t "$base" .
 
   # --- Warm Node's compile cache into the image. ---
   #
@@ -160,7 +226,9 @@ steps:
   # Postgres database, although the cache was made against SQLite. The files it covers
   # are the same; only the driver differs.
   #
-  # The image that ships is a thin layer on top of the one buildx pushed (`-base`), so the
+  # Built once per base (`warm-<key>`, see the first step) and reused after that.
+  #
+  # The image that ships is a thin layer on top of the one buildx pushed (`base-<key>`), so the
   # upstream Dockerfile does not grow a boot-the-app step of its own. The same layer adds
   # docs/multitec/runtime at /app/multitec (the boot screen, inert until the deployment
   # runs its boot.sh), which is how the boot screen ships without editing upstream's
@@ -172,10 +240,16 @@ steps:
       - |
         set -euo pipefail
         image="$(cat /workspace/.image)"
-        docker pull -q "$image-base"
+        base="$(cat /workspace/.base)"
+        warm="$(cat /workspace/.warm)"
+        mkdir -p /workspace/warm
+        cp -r docs/multitec/runtime /workspace/warm/runtime
+
+        if [ "$(cat /workspace/.warm_reused)" != yes ]; then
+        docker pull -q "$base"
         key="$(head -c 32 /dev/urandom | od -An -tx1 | tr -d ' \n')"
         docker run -d --name warm -e SECRET_ENCRYPTION_KEY="$key" \
-          -e NODE_COMPILE_CACHE=/app/.multitec-compile-cache "$image-base"
+          -e NODE_COMPILE_CACHE=/app/.multitec-compile-cache "$base"
         for attempt in $(seq 1 180); do
           if docker exec warm wget -q -O /dev/null http://127.0.0.1:7575/api/health/live; then break; fi
           sleep 1
@@ -184,8 +258,6 @@ steps:
         docker exec warm wget -q -O /dev/null http://127.0.0.1:7575/ || true
         docker exec warm wget -q -O /dev/null http://127.0.0.1:7575/auth/login || true
         docker stop -t 30 warm
-        mkdir -p /workspace/warm
-        cp -r docs/multitec/runtime /workspace/warm/runtime
         docker cp warm:/app/.multitec-compile-cache /workspace/warm/compile-cache
         docker rm warm
         size_mb="$(du -sm /workspace/warm/compile-cache | cut -f1)"
@@ -194,8 +266,17 @@ steps:
           echo "compile cache is too small to be the real one, refusing to ship it"
           exit 1
         fi
-        printf 'FROM %s\nCOPY runtime /app/multitec\nCOPY compile-cache /app/.multitec-compile-cache\nENV NODE_COMPILE_CACHE=/app/.multitec-compile-cache\n' \
-          "$image-base" > /workspace/warm/Dockerfile
+        printf 'FROM %s\nCOPY compile-cache /app/.multitec-compile-cache\nENV NODE_COMPILE_CACHE=/app/.multitec-compile-cache\n' \
+          "$base" > /workspace/warm/Dockerfile.warm
+        docker build -q -f /workspace/warm/Dockerfile.warm -t "$warm" /workspace/warm
+        docker push -q "$warm"
+        else
+        echo "compile cache: REUSING $warm"
+        docker pull -q "$warm"
+        fi
+
+        # The only layer a docs/multitec/runtime change rebuilds.
+        printf 'FROM %s\nCOPY runtime /app/multitec\n' "$warm" > /workspace/warm/Dockerfile
         docker build -q -t "$image" /workspace/warm
         docker push -q "$image"
 
