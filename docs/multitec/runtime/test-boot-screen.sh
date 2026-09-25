@@ -83,7 +83,9 @@ pa=$(free_port)
 docker run -d --name "$tag-a" -p "127.0.0.1:$pa:7575" "${mounts[@]}" -e MULTITEC_READY_TIMEOUT_MS=1500 \
   --entrypoint sh "$image" /app/multitec/boot.sh sh -c "$nginx_only" >/dev/null
 wait_port a "$pa" || fail "nginx never listened"
-wait_log "$tag-a" "waiter listening" || fail "the waiter never listened"
+# NO wait for the waiter here, on purpose: boot.sh must start it BEFORE nginx listens, so
+# the long-poll below, sent the moment nginx answers, has to be held. On Cloud Run a
+# long-poll that lands before the waiter is an instant 503 and a boot on a throttled CPU.
 screen_checks "$pa" A
 
 path=/api/trpc/board.getHomeBoard request "$pa" "$work/trpc" -H "Accept: */*" -H "Sec-Fetch-Mode: cors"

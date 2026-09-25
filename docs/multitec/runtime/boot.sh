@@ -65,6 +65,22 @@ cp "$here/loading.html" /usr/share/multitec/loading.html
 
 node "$here/ready-waiter.mjs" &
 
+# The waiter must be LISTENING before nginx is, and that is measured, not tidiness. The
+# startup probe is TCP on nginx, so the moment nginx binds, Cloud Run calls the instance
+# started and, with no request in flight, throttles its CPU. On the first deploy of this
+# (2026-09-25, revision mt-portal-00027) the waiter then took 60 s to start and Next.js
+# three minutes. A screen whose long-poll lands before the waiter listens gets an instant
+# 503 instead of an open request, so every retry buys a sliver of CPU and the boot crawls.
+# Starting the waiter here, while the instance still has its full (boosted) startup CPU,
+# costs a fraction of a second before the screen and makes the long-poll real from the
+# very first request.
+for _ in $(seq 1 100); do
+  if wget -q -O /dev/null http://127.0.0.1:${MULTITEC_READY_PORT:-3002}/alive 2>/dev/null; then
+    break
+  fi
+  sleep 0.05
+done
+
 if [ "$#" -eq 0 ]; then
   set -- sh run.sh
 fi

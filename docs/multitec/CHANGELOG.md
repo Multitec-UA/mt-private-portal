@@ -11,6 +11,32 @@ was verified afterwards.
 
 ---
 
+## 2026-09-25 — the boot screen's waiter starts before nginx
+
+**What.** `boot.sh` now waits until `ready-waiter.mjs` answers `/alive` before it hands
+over to upstream's `run.sh` and its nginx.
+
+**Why.** Measured on the first deploy of the boot screen (revision `mt-portal-00027`).
+The TCP probe passed 0.6 s into the instance. Cloud Run then throttled the CPU, because
+no request was in flight. After that:
+
+- The waiter took 60 s to listen.
+- Next.js took three minutes to say `Ready`.
+
+A screen whose long-poll lands before the waiter is listening gets an instant 503. So each
+retry only buys a sliver of CPU and the boot crawls. Starting the waiter while the instance
+still has its startup CPU means the very first long-poll is really held.
+
+**Evidence.**
+
+- `test-boot-screen.sh` against `f2ed78c`: OK. The screen came after 0.7 s and the portal
+  was healthy after 2.7 s, with the compile cache now inside the image.
+- Phase A no longer waits for the waiter before sending the long-poll.
+- Negative control: with the wait removed from `boot.sh`, `FAIL A: the long-poll HOLDS the
+  request while Homarr is down`.
+
+---
+
 ## 2026-09-25 — a boot screen instead of 13 seconds of white, and a faster boot behind it
 
 **What.**

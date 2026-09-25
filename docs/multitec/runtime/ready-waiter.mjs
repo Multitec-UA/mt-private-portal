@@ -73,6 +73,11 @@ const wakeDatabase = async () => {
 void wakeDatabase();
 
 createServer(async (req, res) => {
+  // boot.sh waits for this before it starts nginx; see the note there.
+  if (req.url === "/alive") {
+    res.writeHead(200).end("alive");
+    return;
+  }
   if (req.url !== "/ready") {
     res.writeHead(404).end();
     return;
