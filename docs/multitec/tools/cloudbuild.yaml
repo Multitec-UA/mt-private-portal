@@ -143,29 +143,156 @@ steps:
         docker buildx build --push \
           --build-arg SKIP_ENV_VALIDATION=true \
           --build-arg CI=true \
-          -t "$image_tag" .
+          -t "$image_tag-base" .
 
-  # --- Roll it out. ---
+  # --- Warm Node's compile cache into the image. ---
+  #
+  # Node 22+ can keep V8's compiled code on disk (`NODE_COMPILE_CACHE`) and reuse it on the
+  # next start, but on Cloud Run every cold start IS the first start: the filesystem is
+  # memory and dies with the instance. So the cache is made here, once per image, by
+  # booting it with its own defaults (a throwaway SQLite database inside the container,
+  # nothing of ours), loading the health check and two pages, and stopping it GRACEFULLY:
+  # Node writes the cache at exit, and a `docker rm -f` measured 976 KB of cache against
+  # 6.7 MB after a clean stop.
+  #
+  # Measured on quantumpc with one CPU (agent repo, docs/research/portal-cold-start.md):
+  # a fresh container with this cache went from 3.5 s to 2.5 s to healthy, against a
+  # Postgres database, although the cache was made against SQLite. The files it covers
+  # are the same; only the driver differs.
+  #
+  # The image that ships is a thin layer on top of the one buildx pushed (`-base`), so the
+  # upstream Dockerfile does not grow a boot-the-app step of its own. The same layer adds
+  # docs/multitec/runtime at /app/multitec (the boot screen, inert until the deployment
+  # runs its boot.sh), which is how the boot screen ships without editing upstream's
+  # Dockerfile: the modified-file budget was full.
+  - name: gcr.io/cloud-builders/docker
+    entrypoint: bash
+    args:
+      - -c
+      - |
+        set -euo pipefail
+        image="$(cat /workspace/.image)"
+        docker pull -q "$image-base"
+        key="$(head -c 32 /dev/urandom | od -An -tx1 | tr -d ' \n')"
+        docker run -d --name warm -e SECRET_ENCRYPTION_KEY="$key" \
+          -e NODE_COMPILE_CACHE=/app/.multitec-compile-cache "$image-base"
+        for attempt in $(seq 1 180); do
+          if docker exec warm wget -q -O /dev/null http://127.0.0.1:7575/api/health/live; then break; fi
+          sleep 1
+        done
+        docker exec warm wget -q -O /dev/null http://127.0.0.1:7575/api/health/live
+        docker exec warm wget -q -O /dev/null http://127.0.0.1:7575/ || true
+        docker exec warm wget -q -O /dev/null http://127.0.0.1:7575/auth/login || true
+        docker stop -t 30 warm
+        mkdir -p /workspace/warm
+        cp -r docs/multitec/runtime /workspace/warm/runtime
+        docker cp warm:/app/.multitec-compile-cache /workspace/warm/compile-cache
+        docker rm warm
+        size_mb="$(du -sm /workspace/warm/compile-cache | cut -f1)"
+        echo "compile cache: $size_mb MB"
+        if [ "$size_mb" -lt 2 ]; then
+          echo "compile cache is too small to be the real one, refusing to ship it"
+          exit 1
+        fi
+        printf 'FROM %s\nCOPY runtime /app/multitec\nCOPY compile-cache /app/.multitec-compile-cache\nENV NODE_COMPILE_CACHE=/app/.multitec-compile-cache\n' \
+          "$image-base" > /workspace/warm/Dockerfile
+        docker build -q -t "$image" /workspace/warm
+        docker push -q "$image"
+
+  # --- Migrate the members' database, here and not at every boot. ---
+  #
+  # Upstream's run.sh migrates and re-checks every seed row, one query at a time, at every
+  # start, against a Neon database it has usually just woken. Measured: 3.3 s of every
+  # 13-second cold start. The deployment sets DB_MIGRATIONS_DISABLED=true (upstream's own
+  # switch), so the schema has to move forward somewhere else, and this is the one place
+  # every new image passes through. Before the new revision exists, exactly like the boot
+  # did, so the old revision serves against the new schema for the same few seconds it
+  # always has.
+  #
+  # DB_URL comes straight out of Secret Manager into the environment and on into the
+  # container by NAME (`-e DB_URL`), so the value never appears in a command line or a log.
+  - name: gcr.io/cloud-builders/docker
+    entrypoint: bash
+    secretEnv: ["DB_URL"]
+    args:
+      - -c
+      - |
+        set -euo pipefail
+        image="$(cat /workspace/.image)"
+        docker run --rm -w /app --entrypoint node \
+          -e DB_URL -e DB_DRIVER=node-postgres -e DB_DIALECT=postgresql -e DISABLE_REDIS_LOGS=true \
+          "$image" ./db/migrations/postgresql/migrate.cjs ./db/migrations/postgresql
+
+  # --- Roll it out, but only once it has proved it boots. ---
   #
   # `template[0].containers[0].image` is unconditionally in this project's shared Cloud
   # Run module's `ignore_changes` — Terraform deliberately never touches it, so nothing
-  # updates the running revision unless something calls `gcloud run deploy` itself. Before
-  # a trigger existed, that "something" was a person, three times in one afternoon,
-  # copy-pasting this exact command. The trigger's own service account already carries
-  # `roles/run.admin` (`gcp.cloudbuild.tf`, granted for every service this project builds
-  # this way, not added for this one) so this needs nothing new.
+  # updates the running revision unless something calls `gcloud run deploy` itself. The
+  # trigger's own service account carries `roles/run.admin` (`gcp.cloudbuild.tf`).
   #
-  # Reads `/workspace/.image` rather than recomputing the fallback here: `/workspace` is
-  # the one thing every step in a build shares, and the previous step already resolved
-  # which of `$_IMAGE` / `${_IMAGE_BASE}:${SHORT_SHA}` actually applied.
+  # WHY THE CANDIDATE STEP EXISTS. The startup probe used to be an HTTP check on Homarr's
+  # own health endpoint, which also meant a revision whose Homarr never came up (a bad key,
+  # a broken migration) never received traffic. For the boot screen it is a TCP check on
+  # nginx, which passes within a second, so that protection moves here: deploy with no
+  # traffic under the `candidate` tag, ask the candidate's own URL through IAP until
+  # `/api/health/live` says 200, and only then move traffic and drop the tag. A candidate
+  # that never becomes healthy fails the build and members never see it.
+  #
+  # Through IAP with a JWT this build's own account signs for itself (`aud = <url>/*`, the
+  # only form IAP on Cloud Run accepted from a machine: agent repo, memory
+  # `iap-y-despliegue`). The account is an IAP member of this one service and may sign for
+  # itself only, both in multitec-terrafrom.
+  #
+  # `/__multitec/ready` first, because it is a long-poll: it keeps a request open, which is
+  # what gives a no-traffic candidate CPU to boot under request-based billing.
   - name: gcr.io/cloud-builders/gcloud
     entrypoint: bash
     args:
       - -c
       - |
-        gcloud run deploy mt-portal \
-          --image="$(cat /workspace/.image)" \
+        set -euo pipefail
+        image="$(cat /workspace/.image)"
+        gcloud run deploy mt-portal --image="$image" --no-traffic --tag=candidate \
           --project=multitecweb --region=europe-west1 --quiet
+
+        base_url="$(gcloud run services describe mt-portal --project=multitecweb \
+          --region=europe-west1 --format='value(status.url)')"
+        candidate="https://candidate---$${base_url#https://}"
+        account="$(gcloud auth list --filter=status:ACTIVE --format='value(account)' | head -n1)"
+        now="$(date +%s)"
+        printf '{"iss":"%s","sub":"%s","email":"%s","aud":"%s/*","iat":%s,"exp":%s}' \
+          "$account" "$account" "$account" "$candidate" "$now" "$((now + 1800))" > /workspace/claims.json
+        gcloud iam service-accounts sign-jwt /workspace/claims.json /workspace/iap.jwt \
+          --iam-account="$account" --quiet
+        jwt="$(cat /workspace/iap.jwt)"
+        rm -f /workspace/iap.jwt
+
+        healthy=""
+        deadline=$(( $(date +%s) + 300 ))
+        while [ "$(date +%s)" -lt "$deadline" ]; do
+          code="$(curl -s -o /workspace/health.json -w '%{http_code}' -m 20 \
+            -H "Authorization: Bearer $jwt" "$candidate/api/health/live" || true)"
+          if [ "$code" = "200" ]; then healthy=yes; break; fi
+          echo "candidate not healthy yet (HTTP $code), holding the boot long-poll open"
+          curl -s -o /dev/null -m 80 -H "Authorization: Bearer $jwt" "$candidate/__multitec/ready" || true
+          sleep 2
+        done
+        if [ -z "$healthy" ]; then
+          echo "the candidate never became healthy; traffic stays where it is"
+          cat /workspace/health.json || true
+          exit 1
+        fi
+        echo "candidate healthy: $(cat /workspace/health.json | head -c 300)"
+
+        gcloud run services update-traffic mt-portal --to-latest \
+          --project=multitecweb --region=europe-west1 --quiet
+        gcloud run services update-traffic mt-portal --remove-tags=candidate \
+          --project=multitecweb --region=europe-west1 --quiet
+
+availableSecrets:
+  secretManager:
+    - versionName: projects/multitecweb/secrets/mt-portal-db-url/versions/latest
+      env: DB_URL
 
 # The build is a pnpm install plus a Next.js monorepo build. It was tried on quantumpc
 # first and pushed that machine to 1.6 GB free with 5.6 GB of swap in use, next to a live

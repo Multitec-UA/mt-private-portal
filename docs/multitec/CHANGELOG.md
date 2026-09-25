@@ -11,6 +11,60 @@ was verified afterwards.
 
 ---
 
+## 2026-09-25 — a boot screen instead of 13 seconds of white, and a faster boot behind it
+
+**What.**
+
+1. `docs/multitec/runtime/`, new and ours: `boot.sh` wraps upstream's `run.sh`. It adds two
+   `include` lines to upstream's nginx template at runtime, installs our nginx
+   configuration, and starts `ready-waiter.mjs`. nginx then answers a cold navigation with
+   `loading.html` (status 503, `no-store`, `Retry-After`). Every other request gets a bare
+   503. The screen long-polls `/__multitec/ready` and reloads when Homarr is healthy. The
+   same nginx serves the app icons from the feeds volume at `/multitec-static/icons/`,
+   with a year's `immutable` cache.
+2. `docs/multitec/tools/cloudbuild.yaml`:
+   - The image is warmed with a Node compile cache (`NODE_COMPILE_CACHE`) in a thin layer
+     over the buildx image. The same layer adds `docs/multitec/runtime` at `/app/multitec`.
+   - The database is migrated here, once per image. The deployment sets upstream's own
+     `DB_MIGRATIONS_DISABLED=true`.
+   - The new revision is deployed with no traffic under the `candidate` tag. Traffic moves
+     only after its `/api/health/live` answers 200 through IAP.
+
+No upstream file changed: the guard still counts 13 modified.
+
+**Why.** Sergio, 2026-09-25: a member opening the portal after a quiet spell thinks the
+server is down. Measured on the live service (agent repo,
+`docs/research/portal-cold-start.md`):
+
+- 13.3 s of blank page on a cold start. 3.3 s of it was migrations, about 3 s was the
+  first probe fixed at 10 s, and the rest was Homarr booting.
+- A members' page of 1.33 MB, 94 % of it `data:` icons.
+
+Under request-based billing a no-traffic instance only gets CPU while a request is in
+flight, so the screen's request is a long-poll rather than a once-a-second poll.
+
+**What is deliberately NOT here.** No keep-warm pinging. A live Homarr keeps the Neon
+database awake (Neon ran 12:16 → 13:45 on 2026-09-25, exactly the instance's lifetime
+plus its five-minute autosuspend), and a portal kept warm all day would exhaust Neon
+Free's 100 CU-hours around the 25th of every month.
+
+**Evidence.** `docs/multitec/runtime/test-boot-screen.sh <image>` against the live image
+`83ff70c`: `test-boot-screen: OK`, run several times.
+
+- **Phase A, nginx with nothing behind it:** a navigation gets the screen as HTML with a
+  503. A tRPC call, a POST that asks for HTML and a `fetch()` that asks for HTML all get a
+  bare 503. The long-poll holds its full budget. An icon is 200 `image/webp` cached for a
+  year, and a missing one is a 404 without that cache.
+- **Phase B, the negative control:** upstream's boot fails 5 of the screen checks and
+  serves nginx's bare 502.
+- **Phase C, a real boot:** migrations run standalone, the first navigation gets the
+  screen after 0.4-0.6 s, and Homarr is healthy after 3.8-5.4 s on one local CPU.
+
+Compile cache, measured on quantumpc: a fresh container went from 3.5 s to 2.5 s to
+healthy. `upstream-guard: OK — 13 modified (budget 14)`.
+
+---
+
 ## 2026-09-04 — the tiles can carry information, and one of them can know who is looking
 
 **What.** Three things, and deliberately no more:
