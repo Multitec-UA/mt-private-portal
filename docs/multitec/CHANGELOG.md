@@ -11,6 +11,27 @@ was verified afterwards.
 
 ---
 
+## 2026-09-26 — "Mi suscripción": no e-mail, no magic link, and a clear page without Stripe
+
+Sergio: a member opened "Gestionar suscripción", typed their address into Stripe's
+login and got nothing; he still paid by hand, so Stripe had no customer for him. The old
+route searched Stripe by the @multitecua.com address, and Stripe customers carry the
+personal one, so it found almost nobody and fell back to that login page for everybody.
+
+- `apps/nextjs/src/app/api/subscription/route.ts`: the member's row from the new
+  `member-subscription` feed (quantumpc joins the book to Stripe hourly) names their
+  customer; the subscription is re-checked live; with no customer in the feed it searches
+  `metadata.multitec_email` and the corporate address. A live membership (active,
+  trialing, past_due; a Claude seat does not count) goes straight to Stripe's portal.
+  Anything else gets "Mi suscripción": where they stand (days left, expired), and a button
+  to their own renewal link, which keeps the days they have left. `?portal=1` opens the
+  portal for past payments.
+- `_lib/page.ts` + `page.spec.ts`: the decision and the page, pure.
+
+Evidence: `vitest run` on the spec, in node:24 against this checkout's node_modules:
+13 passed. The feed: `qpc-portal-feed publish --to gcs --bundle slow ... member-subscription`
+published 266 members (39 live in Stripe).
+
 ## 2026-09-25 — the base reuse, verified in Cloud Build: 870 s to 74 s
 
 **Evidence.** Both builds ran on the same tree key, `7c859981764f14ce`.

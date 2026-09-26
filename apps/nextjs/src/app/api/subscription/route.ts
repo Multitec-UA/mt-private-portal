@@ -2,66 +2,98 @@ import { NextResponse } from "next/server";
 
 import { auth } from "@homarr/auth/next";
 
-// The generic Stripe customer-portal login page still asks a real customer to click a
-// magic-link email before it shows them anything — prefilling the address only saves
-// typing it. `claude-seats` (Multitec-UA/claude-seats, app/main.py `/portal`) already
-// solved the actual problem for the same Stripe account: look the signed-in member up
-// as a Customer, then mint them a **billing portal session**, which is a one-time,
-// already-authenticated link straight into their own panel. This route is that same
-// two-call shape, ported to this fork's own signed-in session.
-const STRIPE_PORTAL_LOGIN_URL = "https://billing.stripe.com/p/login/9B63cu0re4Ro0v83A58IU01";
-const RETURN_URL = "https://socios.multitecua.com/boards/socios";
+import { isEnabled, readFeed } from "../multitec/_lib/feed-store";
+import { hasLiveMembership, renderPage, type SubscriptionRow } from "./_lib/page";
 
-function genericLoginRedirect(email: string | undefined) {
-  const url = new URL(STRIPE_PORTAL_LOGIN_URL);
-  url.searchParams.set("locale", "es");
-  if (email) {
-    url.searchParams.set("prefilled_email", email);
+// "Gestionar suscripción" (Sergio, 2026-09-26). The member is already signed in (IAP), so
+// they never type an e-mail:
+//
+//   1. Their row in the `member-subscription` feed (quantumpc joins the book to Stripe,
+//      hourly) names their Stripe customer. Stripe customers carry the PERSONAL address,
+//      so a search by the @multitecua.com one, which is all this service knows, found
+//      almost nobody; that was the bug.
+//   2. The subscription is re-checked live, so a member who paid a minute ago is not told
+//      otherwise by a feed that is an hour old; with no customer in the feed, the customer
+//      is searched live by `metadata.multitec_email` (written by n8n's renewal link) and by
+//      the corporate address.
+//   3. A live membership subscription goes straight into Stripe's portal. Anything else gets
+//      the "Mi suscripción" page: where they stand, and their own renewal link.
+//
+// `?portal=1` opens the portal for any customer they have, for past payments.
+const RETURN_URL = "https://socios.multitecua.com/boards/socios";
+const STRIPE = "https://api.stripe.com/v1";
+
+const html = (body: string) =>
+  new Response(body, { status: 200, headers: { "Content-Type": "text/html; charset=utf-8", "Cache-Control": "private, no-store" } });
+
+async function stripeGet<T>(path: string, key: string): Promise<T | null> {
+  try {
+    const res = await fetch(`${STRIPE}/${path}`, { headers: { Authorization: `Bearer ${key}` }, cache: "no-store" });
+    if (!res.ok) {
+      // The status only: a Stripe error body can echo the request.
+      console.error("subscription: Stripe GET failed", path.split("?")[0], res.status);
+      return null;
+    }
+    return (await res.json()) as T;
+  } catch (error) {
+    console.error("subscription: Stripe GET threw", path.split("?")[0], String(error));
+    return null;
   }
-  return NextResponse.redirect(url.toString(), 307);
 }
 
-export async function GET() {
+async function findCustomer(email: string, key: string): Promise<string | undefined> {
+  const q = encodeURIComponent(`metadata['multitec_email']:'${email.replace(/'/g, "")}'`);
+  const byMeta = await stripeGet<{ data: { id: string }[] }>(`customers/search?query=${q}&limit=1`, key);
+  if (byMeta?.data[0]?.id) return byMeta.data[0].id;
+  const byEmail = await stripeGet<{ data: { id: string }[] }>(`customers?email=${encodeURIComponent(email)}&limit=1`, key);
+  return byEmail?.data[0]?.id;
+}
+
+async function portalRedirect(customer: string, key: string): Promise<Response | null> {
+  try {
+    const res = await fetch(`${STRIPE}/billing_portal/sessions`, {
+      method: "POST",
+      headers: { Authorization: `Bearer ${key}`, "Content-Type": "application/x-www-form-urlencoded" },
+      body: new URLSearchParams({ customer, return_url: RETURN_URL, locale: "es" }),
+      cache: "no-store",
+    });
+    if (!res.ok) {
+      console.error("subscription: Stripe portal session failed", res.status);
+      return null;
+    }
+    const { url } = (await res.json()) as { url: string };
+    return NextResponse.redirect(url, 307);
+  } catch (error) {
+    console.error("subscription: Stripe portal session threw", String(error));
+    return null;
+  }
+}
+
+export async function GET(request: Request) {
   const session = await auth();
-  const email = session?.user.email ?? undefined;
+  const email = (session?.user.email ?? "").trim().toLowerCase();
+  const key = process.env.STRIPE_SECRET_KEY;
+  const wantsPortal = new URL(request.url).searchParams.get("portal") === "1";
 
-  const secretKey = process.env.STRIPE_SECRET_KEY;
-  if (!email || !secretKey) {
-    // No session, or the key isn't wired into this environment (e.g. a preview deploy) —
-    // the prefilled login page is still a real, working fallback, never a dead end.
-    return genericLoginRedirect(email);
+  let row: SubscriptionRow | undefined;
+  if (email && isEnabled()) {
+    const feed = await readFeed("member-subscription");
+    const payload = feed?.payload as Record<string, SubscriptionRow> | undefined;
+    row = payload?.[email];
   }
 
-  const auth_header = { Authorization: `Bearer ${secretKey}` };
-
-  const customerSearch = await fetch(
-    `https://api.stripe.com/v1/customers?email=${encodeURIComponent(email)}&limit=1`,
-    { headers: auth_header },
-  );
-  if (!customerSearch.ok) {
-    // Logged rather than swallowed: a 401 here (bad key) looks identical to "no
-    // subscription" from the outside, and that difference is worth being able to see.
-    console.error("subscription: Stripe customer lookup failed", customerSearch.status, await customerSearch.text());
-    return genericLoginRedirect(email);
-  }
-  const customers = (await customerSearch.json()) as { data: { id: string }[] };
-  const customerId = customers.data[0]?.id;
-  if (!customerId) {
-    // A real member with no Stripe customer yet (or one under a different email) — send
-    // them to the page where they can still identify themselves.
-    return genericLoginRedirect(email);
+  let customer = row?.stripeCliente ?? undefined;
+  if (email && key) {
+    customer ??= await findCustomer(email, key);
+    if (customer) {
+      const subs = await stripeGet<{ data: Parameters<typeof hasLiveMembership>[0] }>(`subscriptions?customer=${encodeURIComponent(customer)}&status=all&limit=20`, key);
+      const live = subs ? hasLiveMembership(subs.data) : Boolean(row?.stripeActiva);
+      if (live || wantsPortal) {
+        const redirect = await portalRedirect(customer, key);
+        if (redirect) return redirect;
+      }
+    }
   }
 
-  const portalSession = await fetch("https://api.stripe.com/v1/billing_portal/sessions", {
-    method: "POST",
-    headers: { ...auth_header, "Content-Type": "application/x-www-form-urlencoded" },
-    body: new URLSearchParams({ customer: customerId, return_url: RETURN_URL }),
-  });
-  if (!portalSession.ok) {
-    console.error("subscription: Stripe portal session failed", portalSession.status, await portalSession.text());
-    return genericLoginRedirect(email);
-  }
-  const { url } = (await portalSession.json()) as { url: string };
-
-  return NextResponse.redirect(url, 307);
+  return html(renderPage(row, email, Boolean(customer)));
 }
