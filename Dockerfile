@@ -1,6 +1,6 @@
 # syntax=docker/dockerfile:1.25
 
-FROM node:24.18.0-alpine AS base
+FROM node:24.22.1-alpine AS base
 
 FROM base AS builder
 ARG TARGETPLATFORM
@@ -54,6 +54,9 @@ WORKDIR /app
 
 # gettext is required for envsubst, openssl for generating AUTH_SECRET, su-exec for running application as non-root
 RUN apk add --no-cache redis nginx bash gettext su-exec openssl
+# Multitec: nothing in the runner calls npm or npx, and the npm bundled with node carries
+# its own copies of tar, undici and brace-expansion that vulnerability scans flag.
+RUN rm -rf /usr/local/lib/node_modules/npm /usr/local/bin/npm /usr/local/bin/npx
 RUN mkdir /appdata
 VOLUME /appdata
 
