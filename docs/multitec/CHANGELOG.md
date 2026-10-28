@@ -11,6 +11,24 @@ was verified afterwards.
 
 ---
 
+## 2026-10-28: tinypool 2 and serialize-javascript 7 for the docs site (vulnerability autopilot)
+
+The recheck after the bump below still found 5 ids, all in the Docusaurus docs site:
+tinypool 1.1.1 (CVE-2026-104848, CVE-2026-104849) and serialize-javascript 6.0.2
+(GHSA-5c6j-r48x-rmvq). Both fixes are majors whose only breaking change is dropping
+old Node: tinypool 2.0 drops Node 18 (1.x was already ESM), serialize-javascript 7
+needs Node 20 and keeps the same CommonJS API (copy-webpack-plugin 14 and
+css-minimizer-webpack-plugin 8 already depend on it).
+
+- `overrides`: `tinypool@<2.1.2` to ^2.2.0 (was only the 2.x range) and
+  `serialize-javascript@<7.1.4` to ^7.1.4. The lockfile diff is these two packages and
+  the dropped `randombytes`.
+- The production image builds only `@homarr/nextjs` and the cli, so its runtime is
+  unchanged.
+- Evidence: `pnpm run build` in `apps/docs` (node 24.22.1) generated 288 HTML pages with
+  tinypool 2.2.0 and serialize-javascript 7.1.4 installed. grype on a `git archive` of the
+  commit: 70 ids, none of the 5, and no id that was not there before.
+
 ## 2026-10-28 — Security bump of the dependencies (vulnerability autopilot)
 
 The quantumpc vulnerability scan of 2026-10-26 found 315 ids in this repo's lockfiles
