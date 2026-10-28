@@ -11,6 +11,32 @@ was verified afterwards.
 
 ---
 
+## 2026-10-28 — Security bump of the dependencies (vulnerability autopilot)
+
+The quantumpc vulnerability scan of 2026-10-26 found 315 ids in this repo's lockfiles
+(worst: axios NO_PROXY bypass, CVE-2026-44492). On top of the image bump of 2026-10-27
+(node 24.22.1, next 16.4.1, undici 7.30.1, no npm at runtime):
+
+- `pnpm-workspace.yaml` catalog: adm-zip 0.6.1 (security release; its one behaviour
+  change is `extractEntryTo` on folders, which nothing here calls), fastify ^5.12.5,
+  fast-xml-parser ^5.10.1, mysql2 3.23.1, next-auth 5.0.0-beta.32, vite ^8.1.6,
+  vitest and `@vitest/*` ^4.1.11, zod ^4.6.6.
+- `overrides`: in-major floors for 45 transitive packages (axios ^1.20.0, handlebars,
+  hono, undici 6 and 8, ip-address through socks ^2.8.10, postcss, js-yaml, ...).
+- `docs/multitec/spikes/iap-probe/requirements.txt`: PyJWT 2.15.0.
+- `@auth/core` ^0.41.3 and `esbuild` ^0.28.1 in the catalog, and
+  `@extractus/feed-extractor>fast-xml-parser` ^5.10.1 (it pins 5.9.3 exactly).
+- Left on purpose (only a major bump would fix them): katex 0.16 (mermaid 11 pins
+  ^0.16), and in docs-site or dev-only packages uuid 8 (sockjs), serialize-javascript 6,
+  tinypool 1 and postcss-selector-parser 6 (Docusaurus). quill 2.0.3 and
+  http-cache-semantics 4.2.0 have no fixed release.
+
+Evidence: lockfile regenerated with pnpm 11.15.1; Cloud Build's vitest set 182/182;
+`tsc --noEmit` clean in `packages/old-import`, `packages/auth`, `packages/api`;
+`upstream-guard.sh` only the 2 violations already on `multitec`; grype on the checkout:
+226 of the scan's 315 ids before this change, 10 after, all from the packages left
+on purpose above.
+
 ## 2026-09-26 — "Mi suscripción": no e-mail, no magic link, and a clear page without Stripe
 
 Sergio: a member opened "Gestionar suscripción", typed their address into Stripe's
