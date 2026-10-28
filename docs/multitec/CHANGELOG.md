@@ -11,7 +11,7 @@ was verified afterwards.
 
 ---
 
-## 2026-10-28 — tinypool 2 and serialize-javascript 7 for the docs site (vulnerability autopilot)
+## 2026-10-28: tinypool 2 and serialize-javascript 7 for the docs site (vulnerability autopilot)
 
 The recheck after the bump below still found 5 ids, all in the Docusaurus docs site:
 tinypool 1.1.1 (CVE-2026-104848, CVE-2026-104849) and serialize-javascript 6.0.2
