@@ -54,7 +54,7 @@ WORKDIR /app
 
 # gettext is required for envsubst, openssl for generating AUTH_SECRET, su-exec for running application as non-root
 # Multitec: the version floor is the NGINX2Root fix (CVE-2026-123007 and 9 more, 2026-11-18). It also
-# changes this layer's cache key, so a build cannot reuse an older, vulnerable nginx; and it fails
+# changes this layer's cache key, so a build cannot reuse an older, vulnerable nginx, and it fails
 # the build rather than ship one if the Alpine repository ever lacks the fixed version.
 RUN apk add --no-cache redis "nginx>=1.30.7" bash gettext su-exec openssl
 # Multitec: nothing in the runner calls npm or npx, and the npm bundled with node carries
